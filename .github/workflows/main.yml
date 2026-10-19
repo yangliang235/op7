@@ -30,11 +30,8 @@ jobs:
 
       - name: 03. 应用 cgroup v2 freezer 补丁
         run: |
-          # 4.14 cgroup v2 freezer 补丁，适配 blu_spark-11
-          # 如果你有自己的补丁文件，可以替换下面raw链接
           wget https://raw.githubusercontent.com/yangliang235/patch-storage/main/cgroup-v2-freezer-4.14.patch -O cgroup-v2-freezer.patch
           patch -p1 < cgroup-v2-freezer.patch || true
-          # patch失败不会终止CI，方便你看日志手动调整补丁
 
       - name: 04. 拉取 KPatch-Next
         uses: actions/checkout@v4
@@ -68,13 +65,10 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make ${{ github.event.inputs.defconfig_name }}
-          # 开启 cgroup v2 freezer
           scripts/config --set-val CONFIG_CGROUP_FREEZER y
           scripts/config --set-val CONFIG_CGROUP_V2_FREEZER y
-          # KPatch-Next 必须开启
           scripts/config --set-val CONFIG_KALLSYMS y
           scripts/config --set-val CONFIG_KALLSYMS_ALL y
-          # 保存修改后的defconfig
           make savedefconfig
 
       - name: 09. 编译内核 Image
@@ -116,7 +110,6 @@ supported.versions=
 supported.patchlevels=
 '; }
 
-# A/B分区标记，OnePlus7是A/B
 BLOCK=/dev/block/bootdevice/by-name/boot
 IS_SLOT_DEVICE=1
 RAMDISK_MOD=0
@@ -128,4 +121,4 @@ EOF
         uses: actions/upload-artifact@v4
         with:
           name: OP7-Kernel-KPMv2-CgroupV2Freezer
-          path: OP7-Kernel-Kernel-KPMv2-CgroupV2Freezer.zip
+          path: OP7-Kernel-KPMv2-CgroupV2Freezer.zip
