@@ -1,0 +1,131 @@
+name: OP7 BluSpark Kernel | KPM v2 + CgroupV2 Freezer
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig_name:
+        description: 内核defconfig
+        default: "op7-perf_defconfig"
+        required: true
+      kpatch_branch:
+        description: KPatch-Next 分支
+        default: "main"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 01. 拉取 OP7 内核源码
+        uses: actions/checkout@v4
+        with:
+          repository: yangliang235/op7
+          ref: blu_spark-11
+          fetch-depth: 1
+
+      - name: 02. 安装编译依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential libssl-dev bc flex bison libelf-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake git wget curl rsync
+
+      - name: 03. 应用 cgroup v2 freezer 补丁
+        run: |
+          # 4.14 cgroup v2 freezer 补丁，适配 blu_spark-11
+          # 如果你有自己的补丁文件，可以替换下面raw链接
+          wget https://raw.githubusercontent.com/yangliang235/patch-storage/main/cgroup-v2-freezer-4.14.patch -O cgroup-v2-freezer.patch
+          patch -p1 < cgroup-v2-freezer.patch || true
+          # patch失败不会终止CI，方便你看日志手动调整补丁
+
+      - name: 04. 拉取 KPatch-Next
+        uses: actions/checkout@v4
+        with:
+          repository: bmax121/KPatch-Next
+          ref: ${{ github.event.inputs.kpatch_branch }}
+          path: KPatch-Next
+          submodules: true
+
+      - name: 05. 下载 aarch64-none-elf 工具链（编译kpimg）
+        run: |
+          wget https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.07-x86_64-aarch64-none-elf.tar.xz
+          tar -xf gcc-arm-10.3-2021.07-x86_64-aarch64-none-elf.tar.xz
+          echo "$PWD/gcc-arm-10.3-2021.07-x86_64-aarch64-none-elf/bin" >> $GITHUB_PATH
+
+      - name: 06. 编译 kpimg (KPM v2 runtime)
+        run: |
+          cd KPatch-Next/kpimg
+          make CROSS_COMPILE=aarch64-none-elf-
+          cd ../..
+
+      - name: 07. 编译 kptools（镜像注入工具）
+        run: |
+          cd KPatch-Next/kptools
+          cmake -B build
+          cmake --build build -j$(nproc)
+          cd ../..
+
+      - name: 08. 配置内核，开启 cgroupv2 freezer + KALLSYMS
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make ${{ github.event.inputs.defconfig_name }}
+          # 开启 cgroup v2 freezer
+          scripts/config --set-val CONFIG_CGROUP_FREEZER y
+          scripts/config --set-val CONFIG_CGROUP_V2_FREEZER y
+          # KPatch-Next 必须开启
+          scripts/config --set-val CONFIG_KALLSYMS y
+          scripts/config --set-val CONFIG_KALLSYMS_ALL y
+          # 保存修改后的defconfig
+          make savedefconfig
+
+      - name: 09. 编译内核 Image
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make -j$(nproc)
+
+      - name: 10. KPatch-Next 注入 KPM v2 runtime 到 Image
+        run: |
+          ./KPatch-Next/kptools/build/kptools -p \
+            -i arch/arm64/boot/Image \
+            -k KPatch-Next/kpimg/kpimg \
+            -o arch/arm64/boot/Image_patched
+
+      - name: 11. 拉取 AnyKernel3 打包
+        uses: actions/checkout@v4
+        with:
+          repository: osm0sis/AnyKernel3
+          path: AnyKernel3
+          fetch-depth: 1
+
+      - name: 12. 配置 AnyKernel3，写入 patched Image
+        run: |
+          cp arch/arm64/boot/Image_patched AnyKernel3/Image
+          cat > AnyKernel3/anykernel.sh <<'EOF'
+#!/sbin/sh
+# AnyKernel3 Ramdisk Mod Script
+properties() { '
+kernel.string=OP7 BluSpark + KPM v2 + CgroupV2 Freezer
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=op7
+device.name2=guacamoleb
+supported.versions=
+supported.patchlevels=
+'; }
+
+# A/B分区标记，OnePlus7是A/B
+BLOCK=/dev/block/bootdevice/by-name/boot
+IS_SLOT_DEVICE=1
+RAMDISK_MOD=0
+EOF
+          cd AnyKernel3
+          zip -r9 ../OP7-Kernel-KPMv2-CgroupV2Freezer.zip .
+
+      - name: 13. 上传成品zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: OP7-Kernel-KPMv2-CgroupV2Freezer
+          path: OP7-Kernel-Kernel-KPMv2-CgroupV2Freezer.zip
