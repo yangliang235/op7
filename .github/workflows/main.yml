@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev bc flex bison libelf-dev \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake git wget curl rsync
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake git wget curl rsync zlib1g-dev
 
       - name: 03. 应用 cgroup v2 freezer 补丁
         run: |
@@ -36,7 +36,7 @@ jobs:
       - name: 04. 拉取 KPatch-Next
         uses: actions/checkout@v4
         with:
-          repository: bmax121/KPatch-Next
+          repository: KernelSU-Next/KPatch-Next
           ref: ${{ github.event.inputs.kpatch_branch }}
           path: KPatch-Next
           submodules: true
@@ -49,16 +49,19 @@ jobs:
 
       - name: 06. 编译 kpimg (KPM v2 runtime)
         run: |
-          cd KPatch-Next/kpimg
-          make CROSS_COMPILE=aarch64-none-elf-
+          cd KPatch-Next/kernel
+          make TARGET_COMPILE=aarch64-none-elf-
           cd ../..
 
       - name: 07. 编译 kptools（镜像注入工具）
         run: |
-          cd KPatch-Next/kptools
-          cmake -B build
-          cmake --build build -j$(nproc)
-          cd ../..
+          cd KPatch-Next/kernel
+          make TARGET_COMPILE=placeholder hdr
+          cd ../tools
+          mkdir -p build && cd build
+          cmake ..
+          make
+          cd ../../..
 
       - name: 08. 配置内核，开启 cgroupv2 freezer + KALLSYMS
         run: |
@@ -79,9 +82,9 @@ jobs:
 
       - name: 10. KPatch-Next 注入 KPM v2 runtime 到 Image
         run: |
-          ./KPatch-Next/kptools/build/kptools -p \
+          ./KPatch-Next/tools/build/kptools -p \
             -i arch/arm64/boot/Image \
-            -k KPatch-Next/kpimg/kpimg \
+            -k KPatch-Next/kernel/kpimg \
             -o arch/arm64/boot/Image_patched
 
       - name: 11. 拉取 AnyKernel3 打包
@@ -94,26 +97,24 @@ jobs:
       - name: 12. 配置 AnyKernel3，写入 patched Image
         run: |
           cp arch/arm64/boot/Image_patched AnyKernel3/Image
-          cat > AnyKernel3/anykernel.sh <<'EOF'
-#!/sbin/sh
-# AnyKernel3 Ramdisk Mod Script
-properties() { '
-kernel.string=OP7 BluSpark + KPM v2 + CgroupV2 Freezer
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=op7
-device.name2=guacamoleb
-supported.versions=
-supported.patchlevels=
-'; }
-
-BLOCK=/dev/block/bootdevice/by-name/boot
-IS_SLOT_DEVICE=1
-RAMDISK_MOD=0
-EOF
+          cat > AnyKernel3/anykernel.sh <<'AK3EOF'
+          #!/sbin/sh
+          properties() { '
+          kernel.string=OP7 BluSpark + KPM v2 + CgroupV2 Freezer
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=op7
+          device.name2=guacamoleb
+          supported.versions=
+          supported.patchlevels=
+          '; }
+          BLOCK=/dev/block/bootdevice/by-name/boot
+          IS_SLOT_DEVICE=1
+          RAMDISK_MOD=0
+          AK3EOF
           cd AnyKernel3
           zip -r9 ../OP7-Kernel-KPMv2-CgroupV2Freezer.zip .
 
