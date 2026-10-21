@@ -11,6 +11,7 @@ env:
   ANYKERNEL_DIR: AnyKernel3
   FRAGMENT: fragment/apatch.fragment
   CLANG_REPO: LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r487747c
+  CLANG_DIR: clang
 
 jobs:
   build:
@@ -18,21 +19,28 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: 拉取内核源码
+      - name: 拉取内核源码 op7
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: 拉取 AOSP Clang 工具链（使用checkout，规避git clone credential 128错误）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CLANG_REPO }}
+          path: ${{ env.CLANG_DIR }}
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: 安装编译依赖
         run: |
           sudo apt update
           sudo apt install -y zip bison flex libssl-dev bc git ccache
 
-      - name: 拉取AOSP Clang（带token认证，修复128报错）
+      - name: 配置环境变量 clang
         run: |
-          git clone --depth=1 https://${{ github.token }}@github.com/${{ env.CLANG_REPO }} clang
-          echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
-          export PATH=$PWD/clang/bin:$PATH
+          echo "PATH=$PWD/${{ env.CLANG_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
       - name: 内核配置 + merge apatch fragment
         run: |
@@ -45,7 +53,7 @@ jobs:
           make -j$(nproc) CC=clang CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld LLVM=1 LLVM_IAS=1
           cp arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
 
-      - name: 打包AnyKernel刷机包（⚠️ 不strip内核）
+      - name: 打包AnyKernel刷机包 ⚠️ 不strip内核
         run: |
           cd ${{ env.ANYKERNEL_DIR }}
           zip -r9 ../blu_op7_apatch.zip * -x .git .github README.md
