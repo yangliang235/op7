@@ -23,24 +23,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装依赖 + llvm14
+      - name: 安装依赖 + LLVM14 + OpenSSL 1.1.1
         run: |
           sudo apt update
           sudo apt install -y wget gpg zip bison flex libssl-dev bc ccache
+          # LLVM14
           wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-14 main" | sudo tee /etc/apt/sources.list.d/llvm14.list
+          # openssl1.1.1 源
+          echo "deb http://security.ubuntu.com/ubuntu focal-security main" | sudo tee /etc/apt/sources.list.d/focal.list
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
           sudo apt update
-          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu
+          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu libssl1.1 libssl-dev:amd64
 
       - name: 环境变量
         run: |
           echo "PATH=/usr/lib/llvm-14/bin:$PATH" >> $GITHUB_ENV
 
-      - name: 配置defconfig（O=out，所有make必须统一带O=out）
+      - name: 配置defconfig
         run: |
           make ARCH=arm64 O=${{ env.OUT_DIR }} ${{ env.DEFCONFIG }} CC=clang-14 LD=lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: merge fragment，读取 out/.config
+      - name: merge fragment
         run: |
           scripts/kconfig/merge_config.sh ${{ env.OUT_DIR }}/.config ${{ env.FRAGMENT }}
           grep -E "KALLSYMS|DEBUG_INFO|LTO" ${{ env.OUT_DIR }}/.config
