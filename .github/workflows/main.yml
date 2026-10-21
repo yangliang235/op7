@@ -10,6 +10,7 @@ env:
   DEFCONFIG: op7-perf_defconfig
   ANYKERNEL_DIR: AnyKernel3
   FRAGMENT: fragment/apatch.fragment
+  LLVM_VER: 14.0.6
 
 jobs:
   build:
@@ -25,14 +26,14 @@ jobs:
       - name: 安装编译依赖
         run: |
           sudo apt update
-          sudo apt install -y zip bison flex libssl-dev bc git ccache wget
+          sudo apt install -y zip bison flex libssl-dev bc git wget
 
-      - name: 下载 clang-r487747c（AOSP googlesource，不走github）
+      - name: 下载 ClangBuiltLinux LLVM 14.0.6（github release）
         run: |
+          wget -q https://github.com/ClangBuiltLinux/linux/releases/download/llvm-${{ env.LLVM_VER }}/clang-${{ env.LLVM_VER }}-x86_64-linux-gnu.tar.zst
           mkdir -p clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/clang-r487747c.tar.gz -O clang.tar.gz
-          tar -xf clang.tar.gz -C clang
-          rm clang.tar.gz
+          tar --zstd -xf clang-${{ env.LLVM_VER }}-x86_64-linux-gnu.tar.zst -C clang --strip-components=1
+          rm clang-${{ env.LLVM_VER }}-x86_64-linux-gnu.tar.zst
           echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
 
       - name: 内核配置 + merge apatch fragment
