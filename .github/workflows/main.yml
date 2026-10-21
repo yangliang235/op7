@@ -8,6 +8,7 @@ env:
   ARCH: arm64
   SUBARCH: arm64
   DEFCONFIG: op7-perf_defconfig
+  OUT_DIR: out
   ANYKERNEL_DIR: AnyKernel3
   FRAGMENT: fragment/apatch.fragment
 
@@ -22,33 +23,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 添加 llvm apt源 + 安装 clang-14 lld
+      - name: 安装依赖 + llvm14
         run: |
           sudo apt update
-          sudo apt install -y wget gpg
+          sudo apt install -y wget gpg zip bison flex libssl-dev bc ccache
           wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-14 main" | sudo tee /etc/apt/sources.list.d/llvm14.list
           sudo apt update
-          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu zip bison flex libssl-dev bc ccache
+          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu
 
-      - name: 配置环境变量，优先clang14
+      - name: 环境变量
         run: |
           echo "PATH=/usr/lib/llvm-14/bin:$PATH" >> $GITHUB_ENV
-          echo "CC=clang-14" >> $GITHUB_ENV
-          echo "LD=lld-14" >> $GITHUB_ENV
 
-      - name: 内核配置 + merge apatch fragment
+      - name: 配置defconfig（O=out，所有make必须统一带O=out）
         run: |
-          make ${{ env.DEFCONFIG }}
-          scripts/kconfig/merge_config.sh .config ${{ env.FRAGMENT }}
-          grep -E "KALLSYMS|DEBUG_INFO|LTO" .config
+          make ARCH=arm64 O=${{ env.OUT_DIR }} ${{ env.DEFCONFIG }} CC=clang-14 LD=lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: 编译内核 Image.gz-dtb
+      - name: merge fragment，读取 out/.config
         run: |
-          make -j$(nproc) CC=clang-14 CROSS_COMPILE=aarch64-linux-gnu- LD=lld-14 LLVM=1 LLVM_IAS=1
-          cp arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
+          scripts/kconfig/merge_config.sh ${{ env.OUT_DIR }}/.config ${{ env.FRAGMENT }}
+          grep -E "KALLSYMS|DEBUG_INFO|LTO" ${{ env.OUT_DIR }}/.config
 
-      - name: 打包AnyKernel刷机包 ⚠️ 不strip内核
+      - name: 编译内核
+        run: |
+          make -j$(nproc) ARCH=arm64 O=${{ env.OUT_DIR }} CC=clang-14 LD=lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+          cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
+
+      - name: 打包AnyKernel刷机包 ⚠️ 禁止strip内核
         run: |
           cd ${{ env.ANYKERNEL_DIR }}
           zip -r9 ../blu_op7_apatch.zip * -x .git .github README.md
