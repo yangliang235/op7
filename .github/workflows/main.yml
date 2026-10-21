@@ -10,7 +10,6 @@ env:
   DEFCONFIG: op7-perf_defconfig
   ANYKERNEL_DIR: AnyKernel3
   FRAGMENT: fragment/apatch.fragment
-  LLVM_VER: 14.0.6
 
 jobs:
   build:
@@ -23,18 +22,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装编译依赖
+      - name: 添加 llvm apt源 + 安装 clang-14 lld
         run: |
           sudo apt update
-          sudo apt install -y zip bison flex libssl-dev bc git wget
+          sudo apt install -y wget gpg
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-14 main" | sudo tee /etc/apt/sources.list.d/llvm14.list
+          sudo apt update
+          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu zip bison flex libssl-dev bc ccache
 
-      - name: 下载 ClangBuiltLinux LLVM 14.0.6（github release）
+      - name: 配置环境变量，优先clang14
         run: |
-          wget -q https://github.com/ClangBuiltLinux/linux/releases/download/llvm-${{ env.LLVM_VER }}/clang-${{ env.LLVM_VER }}-x86_64-linux-gnu.tar.zst
-          mkdir -p clang
-          tar --zstd -xf clang-${{ env.LLVM_VER }}-x86_64-linux-gnu.tar.zst -C clang --strip-components=1
-          rm clang-${{ env.LLVM_VER }}-x86_64-linux-gnu.tar.zst
-          echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
+          echo "PATH=/usr/lib/llvm-14/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=clang-14" >> $GITHUB_ENV
+          echo "LD=lld-14" >> $GITHUB_ENV
 
       - name: 内核配置 + merge apatch fragment
         run: |
@@ -44,7 +45,7 @@ jobs:
 
       - name: 编译内核 Image.gz-dtb
         run: |
-          make -j$(nproc) CC=clang CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld LLVM=1 LLVM_IAS=1
+          make -j$(nproc) CC=clang-14 CROSS_COMPILE=aarch64-linux-gnu- LD=lld-14 LLVM=1 LLVM_IAS=1
           cp arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
 
       - name: 打包AnyKernel刷机包 ⚠️ 不strip内核
