@@ -10,8 +10,6 @@ env:
   DEFCONFIG: op7-perf_defconfig
   ANYKERNEL_DIR: AnyKernel3
   FRAGMENT: fragment/apatch.fragment
-  CLANG_REPO: LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r487747c
-  CLANG_DIR: clang
 
 jobs:
   build:
@@ -23,24 +21,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
-
-      - name: 拉取 AOSP Clang 工具链（使用checkout，规避git clone credential 128错误）
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.CLANG_REPO }}
-          path: ${{ env.CLANG_DIR }}
-          fetch-depth: 1
-          persist-credentials: false
 
       - name: 安装编译依赖
         run: |
           sudo apt update
-          sudo apt install -y zip bison flex libssl-dev bc git ccache
+          sudo apt install -y zip bison flex libssl-dev bc git ccache wget
 
-      - name: 配置环境变量 clang
+      - name: 下载 clang-r487747c（AOSP googlesource，不走github）
         run: |
-          echo "PATH=$PWD/${{ env.CLANG_DIR }}/bin:$PATH" >> $GITHUB_ENV
+          mkdir -p clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/clang-r487747c.tar.gz -O clang.tar.gz
+          tar -xf clang.tar.gz -C clang
+          rm clang.tar.gz
+          echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
 
       - name: 内核配置 + merge apatch fragment
         run: |
