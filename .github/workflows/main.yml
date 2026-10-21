@@ -10,32 +10,34 @@ env:
   DEFCONFIG: op7-perf_defconfig
   ANYKERNEL_DIR: AnyKernel3
   FRAGMENT: fragment/apatch.fragment
+  CLANG_REPO: LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r487747c
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
-      - name: 拉取源码
+      - name: 拉取内核源码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 安装依赖
+      - name: 安装编译依赖
         run: |
           sudo apt update
           sudo apt install -y zip bison flex libssl-dev bc git ccache
 
-      - name: 拉取Clang工具链（blu常用的AOSP clang，你可以按需替换）
+      - name: 拉取AOSP Clang（带token认证，修复128报错）
         run: |
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r487747c clang
+          git clone --depth=1 https://${{ github.token }}@github.com/${{ env.CLANG_REPO }} clang
           echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
           export PATH=$PWD/clang/bin:$PATH
 
-      - name: 配置内核 + merge apatch fragment
+      - name: 内核配置 + merge apatch fragment
         run: |
           make ${{ env.DEFCONFIG }}
           scripts/kconfig/merge_config.sh .config ${{ env.FRAGMENT }}
-          # 打印配置校验，日志里直接看是否生效
           grep -E "KALLSYMS|DEBUG_INFO|LTO" .config
 
       - name: 编译内核 Image.gz-dtb
@@ -43,13 +45,13 @@ jobs:
           make -j$(nproc) CC=clang CROSS_COMPILE=aarch64-linux-gnu- LD=ld.lld LLVM=1 LLVM_IAS=1
           cp arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
 
-      - name: 打包 AnyKernel3 刷机包（重点：不strip内核！）
+      - name: 打包AnyKernel刷机包（⚠️ 不strip内核）
         run: |
           cd ${{ env.ANYKERNEL_DIR }}
           zip -r9 ../blu_op7_apatch.zip * -x .git .github README.md
           cd ..
 
-      - name: 上传刷机包
+      - name: 上传Artifact
         uses: actions/upload-artifact@v4
         with:
           name: BluSpark-OP7-APatch
