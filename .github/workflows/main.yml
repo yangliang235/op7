@@ -23,18 +23,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装依赖 + LLVM14 + OpenSSL 1.1.1
+      - name: 安装依赖 + LLVM14
         run: |
           sudo apt update
           sudo apt install -y wget gpg zip bison flex libssl-dev bc ccache
-          # LLVM14
           wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-14 main" | sudo tee /etc/apt/sources.list.d/llvm14.list
-          # openssl1.1.1 源
-          echo "deb http://security.ubuntu.com/ubuntu focal-security main" | sudo tee /etc/apt/sources.list.d/focal.list
-          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
           sudo apt update
-          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu libssl1.1 libssl-dev:amd64
+          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu
 
       - name: 环境变量
         run: |
@@ -47,11 +43,13 @@ jobs:
       - name: merge fragment
         run: |
           scripts/kconfig/merge_config.sh ${{ env.OUT_DIR }}/.config ${{ env.FRAGMENT }}
-          grep -E "KALLSYMS|DEBUG_INFO|LTO" ${{ env.OUT_DIR }}/.config
+          grep -E "KALLSYMS|DEBUG_INFO|LTO|MODULE_SIG|SYSTEM_TRUSTED_KEYS" ${{ env.OUT_DIR }}/.config
 
-      - name: 编译内核
+      - name: 编译内核（增加HOSTCC屏蔽openssl废弃告警）
         run: |
-          make -j$(nproc) ARCH=arm64 O=${{ env.OUT_DIR }} CC=clang-14 LD=lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+          make -j$(nproc) ARCH=arm64 O=${{ env.OUT_DIR }} \
+            HOSTCC="clang-14 -Wno-deprecated-declarations" \
+            CC=clang-14 LD=lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
           cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
 
       - name: 打包AnyKernel刷机包 ⚠️ 禁止strip内核
