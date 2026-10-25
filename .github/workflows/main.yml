@@ -1,65 +1,106 @@
-name: Build BluSpark OP7 APatch Kernel
+name: Build OP7 kernel with APatch support
+
 on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: '内核 defconfig'
+        required: true
+        default: 'op7-perf_defconfig'
+      make_target:
+        description: '编译目标'
+        required: true
+        default: 'Image.gz-dtb'
   push:
     branches: [ main ]
-  workflow_dispatch:
+    paths:
+      - 'fragment/apatch.fragment'
+      - '.github/workflows/build-apatch.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: op7-apatch-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   ARCH: arm64
-  SUBARCH: arm64
-  DEFCONFIG: op7-perf_defconfig
-  OUT_DIR: out
-  ANYKERNEL_DIR: AnyKernel3
-  FRAGMENT: fragment/apatch.fragment
+  CROSS_COMPILE: aarch64-linux-gnu-
+  DEFCONFIG: ${{ github.event.inputs.defconfig || 'vendor/kona-perf_defconfig' }}
+  MAKE_TARGET: ${{ github.event.inputs.make_target || 'Image.gz-dtb' }}
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
+    timeout-minutes: 150
+
     steps:
-      - name: 拉取内核源码 op7
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: 安装依赖 + LLVM14
+      - name: Install build dependencies
         run: |
-          sudo apt update
-          sudo apt install -y wget gpg zip bison flex libssl-dev bc ccache
-          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-14 main" | sudo tee /etc/apt/sources.list.d/llvm14.list
-          sudo apt update
-          sudo apt install -y clang-14 lld-14 llvm-14 binutils-aarch64-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip git curl python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            device-tree-compiler
 
-      - name: 环境变量
+      - name: Configure kernel and merge APatch fragment
         run: |
-          echo "PATH=/usr/lib/llvm-14/bin:$PATH" >> $GITHUB_ENV
+          set -euxo pipefail
 
-      - name: 配置defconfig
+          if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
+            echo "找不到 defconfig: arch/arm64/configs/${DEFCONFIG}"
+            echo "当前可用 defconfig："
+            ls arch/arm64/configs | head -50
+            exit 1
+          fi
+
+          if [ ! -f "fragment/apatch.fragment" ]; then
+            echo "找不到 fragment/apatch.fragment"
+            exit 1
+          fi
+
+          make ARCH=arm64 O=out "${DEFCONFIG}"
+
+          ./scripts/kconfig/merge_config.sh -m -O out out/.config fragment/apatch.fragment
+          make ARCH=arm64 O=out olddefconfig
+
+          echo "===== APatch/KernelPatch 相关配置 ====="
+          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU)' out/.config || true
+
+      - name: Build kernel
         run: |
-          make ARCH=arm64 O=${{ env.OUT_DIR }} ${{ env.DEFCONFIG }} CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
+          set -euxo pipefail
+          make ARCH=arm64 \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            O=out \
+            -j"$(nproc)" \
+            "${MAKE_TARGET}"
 
-      - name: merge fragment
+      - name: Collect artifacts
         run: |
-          scripts/kconfig/merge_config.sh ${{ env.OUT_DIR }}/.config ${{ env.FRAGMENT }}
-          grep -E "KALLSYMS|DEBUG_INFO|LTO|MODULE_SIG|SYSTEM_TRUSTED_KEYS" ${{ env.OUT_DIR }}/.config
+          set -euxo pipefail
+          mkdir -p artifact
 
-      - name: 编译内核（修复vdso ld.lld命名问题）
-        run: |
-          make -j$(nproc) ARCH=arm64 O=${{ env.OUT_DIR }} \
-            HOSTCC="clang-14 -Wno-deprecated-declarations" \
-            CC=clang-14 LD=ld.lld-14 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
-          cp ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz-dtb ${{ env.ANYKERNEL_DIR }}/
+          find out/arch/arm64/boot -maxdepth 1 -type f \
+            \( -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' \) \
+            -exec cp {} artifact/ \;
 
-      - name: 打包AnyKernel刷机包 ⚠️ 禁止strip内核
-        run: |
-          cd ${{ env.ANYKERNEL_DIR }}
-          zip -r9 ../blu_op7_apatch.zip * -x .git .github README.md
-          cd ..
+          cp out/.config artifact/kernel.config
+          cp fragment/apatch.fragment artifact/apatch.fragment
 
-      - name: 上传Artifact
+          echo "===== artifact 内容 ====="
+          ls -lh artifact
+
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: BluSpark-OP7-APatch
-          path: blu_op7_apatch.zip
+          name: op7-apatch-kernel-${{ github.run_number }}
+          path: artifact/
+          if-no-files-found: error
