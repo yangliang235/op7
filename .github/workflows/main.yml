@@ -1,99 +1,3 @@
-name: Build OP7 APatch kernel (flashable zip)
-
-on:
-  workflow_dispatch:
-    inputs:
-      defconfig:
-        description: '内核 defconfig（不带 arch/arm64/configs/ 前缀）'
-        required: true
-        default: 'op7-perf_defconfig'
-      make_target:
-        description: '编译目标'
-        required: true
-        default: 'Image.gz-dtb'
-  push:
-    branches: [ main ]
-    paths:
-      - 'fragment/apatch.fragment'
-      - '.github/workflows/build-apatch.yml'
-
-permissions:
-  contents: read
-
-concurrency:
-  group: op7-apatch-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  ARCH: arm64
-  CROSS_COMPILE: aarch64-linux-gnu-
-  DEFCONFIG: ${{ github.event.inputs.defconfig || 'op7-perf_defconfig' }}
-  MAKE_TARGET: ${{ github.event.inputs.make_target || 'Image.gz-dtb' }}
-
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 150
-
-    steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            zip unzip git curl python3 \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            device-tree-compiler
-
-      - name: Configure kernel and merge APatch fragment
-        run: |
-          set -euxo pipefail
-
-          if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
-            echo "找不到 defconfig: arch/arm64/configs/${DEFCONFIG}"
-            echo "当前可用 defconfig："
-            ls arch/arm64/configs | head -50
-            exit 1
-          fi
-
-          if [ ! -f "fragment/apatch.fragment" ]; then
-            echo "找不到 fragment/apatch.fragment"
-            exit 1
-          fi
-
-          make ARCH=arm64 O=out "${DEFCONFIG}"
-
-          # 追加 INTEGRATED_MODULES 配置
-          echo 'CONFIG_INTEGRATED_MODULES=y' > fragment/integrated-modules.fragment
-
-          ./scripts/kconfig/merge_config.sh -m -O out out/.config \
-            fragment/apatch.fragment \
-            fragment/integrated-modules.fragment
-
-          make ARCH=arm64 O=out olddefconfig
-
-          echo "===== APatch/KernelPatch/INTEGRATED_MODULES 相关配置 ====="
-          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|INTEGRATED_MODULES)' out/.config || true
-
-          if ! grep -q '^CONFIG_INTEGRATED_MODULES=y' out/.config; then
-            echo "警告：CONFIG_INTEGRATED_MODULES 没有保留在 out/.config 中"
-            echo "请确认内核 Kconfig 中定义了 INTEGRATED_MODULES，否则 olddefconfig 会丢弃未定义符号"
-          fi
-
-      - name: Build kernel
-        run: |
-          set -euxo pipefail
-          make ARCH=arm64 \
-            CROSS_COMPILE="${CROSS_COMPILE}" \
-            O=out \
-            -j"$(nproc)" \
-            "${MAKE_TARGET}"
-
       - name: Prepare AnyKernel3 flashable zip
         run: |
           set -euxo pipefail
@@ -106,37 +10,29 @@ jobs:
             exit 1
           fi
 
-          # 拉取 AnyKernel3 模板
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-
-          # 把编译出的内核镜像放到 AnyKernel3 根目录
           cp "${KERNEL_IMAGE}" AnyKernel3/
 
-          # 生成 anykernel.sh，设备代号覆盖 OnePlus 7 / 7T / 7 Pro 系列
-          cat > AnyKernel3/anykernel.sh <<'EOF'
-kernel.string=blu_spark OP7 APatch Kernel
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=guacamole
-device.name2=guacamoleb
-device.name3=hotdog
-device.name4=hotdogb
-device.name5=hotdogg
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=auto;
-ramdisk_compression=auto;
-patch_vbmeta=0;
-patch_dtbo=0;
-patch_dtb=0;
-EOF
+          {
+            echo 'kernel.string=blu_spark OP7 APatch Kernel'
+            echo 'do.devicecheck=1'
+            echo 'do.modules=0'
+            echo 'do.systemless=1'
+            echo 'do.cleanup=1'
+            echo 'do.cleanuponabort=0'
+            echo 'device.name1=guacamole'
+            echo 'device.name2=guacamoleb'
+            echo 'device.name3=hotdog'
+            echo 'device.name4=hotdogb'
+            echo 'device.name5=hotdogg'
+            echo 'block=/dev/block/bootdevice/by-name/boot;'
+            echo 'is_slot_device=auto;'
+            echo 'ramdisk_compression=auto;'
+            echo 'patch_vbmeta=0;'
+            echo 'patch_dtbo=0;'
+            echo 'patch_dtb=0;'
+          } > AnyKernel3/anykernel.sh
 
-          # 去掉 heredoc 写入时可能带上的前导空格
-          sed -i 's/^          //' AnyKernel3/anykernel.sh
-
-          # 清理无关文件，避免 zip 过大
           rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/LICENSE
 
           ZIP_NAME="op7-apatch-kernel-${{ github.run_number }}.zip"
@@ -150,10 +46,3 @@ EOF
 
           echo "===== artifact 内容 ====="
           ls -lh artifact
-
-      - name: Upload flashable zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: op7-apatch-flashable-zip-${{ github.run_number }}
-          path: artifact/
-          if-no-files-found: error
