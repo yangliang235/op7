@@ -80,7 +80,6 @@ jobs:
       - name: Disable -Werror in kernel build system
         run: |
           set -euxo pipefail
-          # 直接删掉 Makefile 和 scripts 里的 -Werror，防止它覆盖 KCFLAGS 里的 -Wno-error
           for f in Makefile scripts/Makefile.build scripts/Makefile.extrawarn scripts/Makefile.lib scripts/Makefile.host; do
             if [ -f "$f" ]; then
               sed -i 's/-Werror//g' "$f"
@@ -108,24 +107,39 @@ jobs:
 
           make ARCH=arm64 O=out "${DEFCONFIG}"
 
-          # 尝试在配置层面禁用 WERROR
-          ./scripts/config --file out/.config -d WERROR || true
-          ./scripts/config --file out/.config -d CC_WERROR || true
+          # 关闭 Stack Protector Strong，避免老内核与新版 GCC 的检测误判
+          ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
+          ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
 
           echo 'CONFIG_NOMOUNT=y' > fragment/nomount.fragment
 
+          {
+            echo 'CONFIG_CC_STACKPROTECTOR_NONE=y'
+            echo '# CONFIG_CC_STACKPROTECTOR_STRONG is not set'
+          } > fragment/stackprotector.fragment
+
           ./scripts/kconfig/merge_config.sh -m -O out out/.config \
             fragment/apatch.fragment \
-            fragment/nomount.fragment
+            fragment/nomount.fragment \
+            fragment/stackprotector.fragment
 
           make ARCH=arm64 O=out olddefconfig
 
-          echo "===== APatch/KernelPatch/NoMount/WERROR 相关配置 ====="
-          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|WERROR|CC_WERROR)' out/.config || true
+          # 再次强制关闭，防止 olddefconfig 因依赖重新启用 STRONG
+          ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
+          ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
+          make ARCH=arm64 O=out olddefconfig
+
+          echo "===== APatch/KernelPatch/NoMount/StackProtector 相关配置 ====="
+          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|CC_STACKPROTECTOR)' out/.config || true
 
           if ! grep -q '^CONFIG_NOMOUNT=y' out/.config; then
             echo "警告：CONFIG_NOMOUNT 没有保留在 out/.config 中"
-            echo "请确认 fs/nomount/Kconfig 中的符号名是 NOMOUNT，且 fs/Kconfig 已 source 它"
+          fi
+
+          if grep -q '^CONFIG_CC_STACKPROTECTOR_STRONG=y' out/.config; then
+            echo "错误：CONFIG_CC_STACKPROTECTOR_STRONG 仍然启用"
+            exit 1
           fi
 
       - name: Build kernel
