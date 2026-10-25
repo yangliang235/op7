@@ -50,6 +50,19 @@ jobs:
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             device-tree-compiler
 
+      - name: Fix strict-prototypes in oneplus_healthinfo
+        run: |
+          set -euxo pipefail
+          FILE="drivers/oneplus/oneplus_healthinfo/oneplus_healthinfo.c"
+          if [ -f "$FILE" ]; then
+            # 把 static void adjust_window() { 改成 static void adjust_window(void) {
+            sed -i 's/static void adjust_window()[[:space:]]*{/static void adjust_window(void) {/' "$FILE"
+            echo "===== 修复后确认 ====="
+            grep -n 'adjust_window' "$FILE" || true
+          else
+            echo "找不到 $FILE，跳过"
+          fi
+
       - name: Configure kernel and merge APatch fragment
         run: |
           set -euxo pipefail
@@ -90,6 +103,7 @@ jobs:
           make ARCH=arm64 \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             O=out \
+            KCFLAGS="-Wno-error=strict-prototypes" \
             -j"$(nproc)" \
             "${MAKE_TARGET}"
 
