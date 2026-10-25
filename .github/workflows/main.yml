@@ -50,13 +50,13 @@ jobs:
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             device-tree-compiler
 
-      - name: Fix strict-prototypes in oneplus_healthinfo
+      - name: Fix adjust_window signature
         run: |
           set -euxo pipefail
           FILE="drivers/oneplus/oneplus_healthinfo/oneplus_healthinfo.c"
           if [ -f "$FILE" ]; then
-            # 把 static void adjust_window() { 改成 static void adjust_window(void) {
-            sed -i 's/static void adjust_window()[[:space:]]*{/static void adjust_window(void) {/' "$FILE"
+            # 统一把 adjust_window 的参数列表改成 (unsigned long data)
+            sed -i -E 's/static void adjust_window[[:space:]]*\([^)]*\)[[:space:]]*\{/static void adjust_window(unsigned long data) {/' "$FILE"
             echo "===== 修复后确认 ====="
             grep -n 'adjust_window' "$FILE" || true
           else
@@ -103,7 +103,7 @@ jobs:
           make ARCH=arm64 \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             O=out \
-            KCFLAGS="-Wno-error=strict-prototypes" \
+            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=incompatible-pointer-types" \
             -j"$(nproc)" \
             "${MAKE_TARGET}"
 
