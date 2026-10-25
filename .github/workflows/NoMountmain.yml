@@ -77,28 +77,20 @@ jobs:
           grep -n 'nomount' fs/Makefile || true
           ls fs/nomount
 
-      - name: Disable -Werror in kernel build system
+      - name: Remove -Werror from all Makefiles
         run: |
           set -euxo pipefail
 
-          echo "===== 修改前包含 -Werror 的行 ====="
-          grep -R -- '-Werror' Makefile scripts/ 2>/dev/null || true
+          echo "===== 删除前包含 -Werror 的文件 ====="
+          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
 
-          # 把 -Werror 替换为 -Wno-error，并处理 =、空格、连字符三种写法
-          grep -rl -- '-Werror' Makefile scripts/ 2>/dev/null | while read -r f; do
-            sed -i -E \
-              -e 's/-Werror=/-Wno-error=/g' \
-              -e 's/-Werror[[:space:]]+-W/-Wno-error -W/g' \
-              -e 's/-Werror-/-Wno-error=/g' \
-              "$f"
+          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null | while read -r f; do
+            sed -i 's/-Werror[^ ]*//g' "$f"
             echo "已处理 $f"
           done
 
-          echo "===== 修改后仍包含 -Werror 的行（应为空） ====="
-          grep -R -- '-Werror' Makefile scripts/ 2>/dev/null || true
-
-          echo "===== 确认 -implicit-function-declaration 不存在 ====="
-          grep -R -- '-implicit-function-declaration' Makefile scripts/ 2>/dev/null || true
+          echo "===== 删除后仍包含 -Werror 的文件（应为空） ====="
+          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
 
       - name: Configure kernel and merge fragments
         run: |
@@ -120,6 +112,8 @@ jobs:
 
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
+          ./scripts/config --file out/.config -d WERROR || true
+          ./scripts/config --file out/.config -d CC_WERROR || true
 
           echo 'CONFIG_NOMOUNT=y' > fragment/nomount.fragment
 
@@ -139,8 +133,8 @@ jobs:
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
           make ARCH=arm64 O=out olddefconfig
 
-          echo "===== APatch/KernelPatch/NoMount/StackProtector 相关配置 ====="
-          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|CC_STACKPROTECTOR)' out/.config || true
+          echo "===== 关键配置 ====="
+          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|CC_STACKPROTECTOR|WERROR)' out/.config || true
 
           if ! grep -q '^CONFIG_NOMOUNT=y' out/.config; then
             echo "警告：CONFIG_NOMOUNT 没有保留在 out/.config 中"
@@ -153,14 +147,22 @@ jobs:
 
       - name: Build kernel
         run: |
-          set -euxo pipefail
+          set -o pipefail
           make ARCH=arm64 \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             O=out \
             WERROR=0 \
-            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=incompatible-pointer-types" \
+            KCFLAGS="-Wno-error" \
             -j"$(nproc)" \
-            "${MAKE_TARGET}"
+            "${MAKE_TARGET}" 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+
+          if [ "$status" -ne 0 ]; then
+            echo "===== 编译失败，以下是所有 error: 行 ====="
+            grep -i "error:" build.log || true
+            echo "===== 错误行结束 ====="
+            exit "$status"
+          fi
 
       - name: Prepare AnyKernel3 flashable zip
         run: |
