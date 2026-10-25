@@ -77,6 +77,19 @@ jobs:
           grep -n 'nomount' fs/Makefile || true
           ls fs/nomount
 
+      - name: Disable -Werror in kernel build system
+        run: |
+          set -euxo pipefail
+          # 直接删掉 Makefile 和 scripts 里的 -Werror，防止它覆盖 KCFLAGS 里的 -Wno-error
+          for f in Makefile scripts/Makefile.build scripts/Makefile.extrawarn scripts/Makefile.lib scripts/Makefile.host; do
+            if [ -f "$f" ]; then
+              sed -i 's/-Werror//g' "$f"
+              echo "已处理 $f"
+            fi
+          done
+          echo "===== 确认 Makefile 中不再有 -Werror ====="
+          grep -R -- '-Werror' Makefile scripts/Makefile.* 2>/dev/null || true
+
       - name: Configure kernel and merge fragments
         run: |
           set -euxo pipefail
@@ -95,6 +108,10 @@ jobs:
 
           make ARCH=arm64 O=out "${DEFCONFIG}"
 
+          # 尝试在配置层面禁用 WERROR
+          ./scripts/config --file out/.config -d WERROR || true
+          ./scripts/config --file out/.config -d CC_WERROR || true
+
           echo 'CONFIG_NOMOUNT=y' > fragment/nomount.fragment
 
           ./scripts/kconfig/merge_config.sh -m -O out out/.config \
@@ -103,8 +120,8 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
-          echo "===== APatch/KernelPatch/NoMount 相关配置 ====="
-          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT)' out/.config || true
+          echo "===== APatch/KernelPatch/NoMount/WERROR 相关配置 ====="
+          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|WERROR|CC_WERROR)' out/.config || true
 
           if ! grep -q '^CONFIG_NOMOUNT=y' out/.config; then
             echo "警告：CONFIG_NOMOUNT 没有保留在 out/.config 中"
@@ -117,6 +134,7 @@ jobs:
           make ARCH=arm64 \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             O=out \
+            WERROR=0 \
             KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-error=incompatible-pointer-types" \
             -j"$(nproc)" \
             "${MAKE_TARGET}"
