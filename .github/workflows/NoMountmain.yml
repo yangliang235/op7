@@ -80,14 +80,25 @@ jobs:
       - name: Disable -Werror in kernel build system
         run: |
           set -euxo pipefail
-          for f in Makefile scripts/Makefile.build scripts/Makefile.extrawarn scripts/Makefile.lib scripts/Makefile.host; do
-            if [ -f "$f" ]; then
-              sed -i 's/-Werror//g' "$f"
-              echo "已处理 $f"
-            fi
+
+          echo "===== 修改前包含 -Werror 的行 ====="
+          grep -R -- '-Werror' Makefile scripts/ 2>/dev/null || true
+
+          # 把 -Werror 替换为 -Wno-error，并处理 =、空格、连字符三种写法
+          grep -rl -- '-Werror' Makefile scripts/ 2>/dev/null | while read -r f; do
+            sed -i -E \
+              -e 's/-Werror=/-Wno-error=/g' \
+              -e 's/-Werror[[:space:]]+-W/-Wno-error -W/g' \
+              -e 's/-Werror-/-Wno-error=/g' \
+              "$f"
+            echo "已处理 $f"
           done
-          echo "===== 确认 Makefile 中不再有 -Werror ====="
-          grep -R -- '-Werror' Makefile scripts/Makefile.* 2>/dev/null || true
+
+          echo "===== 修改后仍包含 -Werror 的行（应为空） ====="
+          grep -R -- '-Werror' Makefile scripts/ 2>/dev/null || true
+
+          echo "===== 确认 -implicit-function-declaration 不存在 ====="
+          grep -R -- '-implicit-function-declaration' Makefile scripts/ 2>/dev/null || true
 
       - name: Configure kernel and merge fragments
         run: |
@@ -107,7 +118,6 @@ jobs:
 
           make ARCH=arm64 O=out "${DEFCONFIG}"
 
-          # 关闭 Stack Protector Strong，避免老内核与新版 GCC 的检测误判
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
 
@@ -125,7 +135,6 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
-          # 再次强制关闭，防止 olddefconfig 因依赖重新启用 STRONG
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
           make ARCH=arm64 O=out olddefconfig
