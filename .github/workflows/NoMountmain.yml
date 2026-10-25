@@ -1,0 +1,180 @@
+name: Build OP7 APatch + NoMount kernel (flashable zip)
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: '内核 defconfig（不带 arch/arm64/configs/ 前缀）'
+        required: true
+        default: 'op7-perf_defconfig'
+      make_target:
+        description: '编译目标'
+        required: true
+        default: 'Image.gz-dtb'
+      nomount_branch:
+        description: 'NoMount 分支'
+        required: true
+        default: 'dev'
+  push:
+    branches: [ main ]
+    paths:
+      - 'fragment/apatch.fragment'
+      - '.github/workflows/main.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: op7-apatch-nomount-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  DEFCONFIG: ${{ github.event.inputs.defconfig || 'op7-perf_defconfig' }}
+  MAKE_TARGET: ${{ github.event.inputs.make_target || 'Image.gz-dtb' }}
+  NOMOUNT_BRANCH: ${{ github.event.inputs.nomount_branch || 'dev' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip git curl python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            device-tree-compiler
+
+      - name: Fix adjust_window signature
+        run: |
+          set -euxo pipefail
+          FILE="drivers/oneplus/oneplus_healthinfo/oneplus_healthinfo.c"
+          if [ -f "$FILE" ]; then
+            sed -i -E 's/static void adjust_window[[:space:]]*\([^)]*\)[[:space:]]*\{/static void adjust_window(unsigned long data) {/' "$FILE"
+            echo "===== 修复后确认 ====="
+            grep -n 'adjust_window' "$FILE" || true
+          else
+            echo "找不到 $FILE，跳过"
+          fi
+
+      - name: Integrate NoMount into kernel source
+        run: |
+          set -euxo pipefail
+          curl -fsSL "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/${NOMOUNT_BRANCH}/kernel/setup.sh" | bash -s "${NOMOUNT_BRANCH}"
+          echo "===== 确认 NoMount 集成 ====="
+          test -d fs/nomount
+          grep -n 'nomount' fs/Kconfig || true
+          grep -n 'nomount' fs/Makefile || true
+          ls fs/nomount
+
+      - name: Configure kernel and merge fragments
+        run: |
+          set -euxo pipefail
+
+          if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
+            echo "找不到 defconfig: arch/arm64/configs/${DEFCONFIG}"
+            echo "当前可用 defconfig："
+            ls arch/arm64/configs | head -50
+            exit 1
+          fi
+
+          if [ ! -f "fragment/apatch.fragment" ]; then
+            echo "找不到 fragment/apatch.fragment"
+            exit 1
+          fi
+
+          make ARCH=arm64 O=out "${DEFCONFIG}"
+
+          # NoMount 内置编译
+          echo 'CONFIG_NOMOUNT=y' > fragment/nomount.fragment
+
+          ./scripts/kconfig/merge_config.sh -m -O out out/.config \
+            fragment/apatch.fragment \
+            fragment/nomount.fragment
+
+          make ARCH=arm64 O=out olddefconfig
+
+          echo "===== APatch/KernelPatch/NoMount 相关配置 ====="
+          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT)' out/.config || true
+
+          if ! grep -q '^CONFIG_NOMOUNT=y' out/.config; then
+            echo "警告：CONFIG_NOMOUNT 没有保留在 out/.config 中"
+            echo "请确认 fs/nomount/Kconfig 中的符号名是 NOMOUNT，且 fs/Kconfig 已 source 它"
+          fi
+
+      - name: Build kernel
+        run: |
+          set -euxo pipefail
+          make ARCH=arm64 \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            O=out \
+            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=incompatible-pointer-types" \
+            -j"$(nproc)" \
+            "${MAKE_TARGET}"
+
+      - name: Prepare AnyKernel3 flashable zip
+        run: |
+          set -euxo pipefail
+
+          KERNEL_IMAGE="out/arch/arm64/boot/${MAKE_TARGET}"
+          if [ ! -f "${KERNEL_IMAGE}" ]; then
+            echo "找不到内核镜像: ${KERNEL_IMAGE}"
+            echo "out/arch/arm64/boot 下的文件："
+            find out/arch/arm64/boot -maxdepth 1 -type f | head -30
+            exit 1
+          fi
+
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+          cp "${KERNEL_IMAGE}" AnyKernel3/
+
+          {
+            echo 'kernel.string=blu_spark OP7 APatch NoMount Kernel'
+            echo 'do.devicecheck=1'
+            echo 'do.modules=0'
+            echo 'do.systemless=1'
+            echo 'do.cleanup=1'
+            echo 'do.cleanuponabort=0'
+            echo 'device.name1=guacamole'
+            echo 'device.name2=guacamoleb'
+            echo 'device.name3=hotdog'
+            echo 'device.name4=hotdogb'
+            echo 'device.name5=hotdogg'
+            echo 'block=/dev/block/bootdevice/by-name/boot;'
+            echo 'is_slot_device=auto;'
+            echo 'ramdisk_compression=auto;'
+            echo 'patch_vbmeta=0;'
+            echo 'patch_dtbo=0;'
+            echo 'patch_dtb=0;'
+          } > AnyKernel3/anykernel.sh
+
+          rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/LICENSE
+
+          ZIP_NAME="op7-apatch-nomount-kernel-${{ github.run_number }}.zip"
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" *
+          cd ..
+
+          mkdir -p artifact
+          mv "${ZIP_NAME}" artifact/
+          cp out/.config artifact/kernel.config
+
+          echo "===== artifact 内容 ====="
+          ls -lh artifact
+
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: op7-apatch-nomount-flashable-zip-${{ github.run_number }}
+          path: artifact/
+          if-no-files-found: error
