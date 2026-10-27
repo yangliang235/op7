@@ -115,7 +115,7 @@ jobs:
 
           with open(makefile_path, "w", encoding="utf-8") as f:
               f.writelines(new_lines)
-          print("===== Python 修复完成 ====="
+          print("===== Python 修复完成 =====")
           '
 
       - name: Configure kernel and merge fragments
