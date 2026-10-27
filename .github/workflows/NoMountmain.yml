@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "===== 删除前包含 -Werror 的文件 ===------+
+          echo "===== 删除前包含 -Werror 的文件 ====="
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
 
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null | while read -r f; do
@@ -104,32 +104,13 @@ jobs:
           for idx in range(954, min(975, len(lines))):
               print(f"{idx+1}: {lines[idx]}", end="")
 
-          # 针对第 964 行左右 unterminated call to function call 的精准修复
-          # 通常是因为高版本 Make 对旧内核某些宏的括号或换行符解析冲突
-          fixed = False
-          for idx in range(max(0, 960-1), min(len(lines), 970)):
-              line = lines[idx]
-              if "call" in line:
-                  print(f"\n正在检查并修复第 {idx+1} 行...")
-                  # 如果括号不匹配，或者包含特定旧语法，这里进行安全处理
-                  # 常见做法：如果该行有未闭合的括号，尝试补齐或简化
-                  # 我们可以将这一行或相关的宏调用转换为安全形态，或者如果它是调试/不关键的行直接注释/替换
-                  # 打印详细信息便于排查
-                  print(f"原始行: {line}")
-
-          # 如果用户 Makefile 第 964 行具体的 call 存在括号问题，可以通过以下通用逻辑调整：
-          # 这里直接对整个 955-970 范围内的常见语法错误进行扫描替换
           new_lines = []
           for i, line in enumerate(lines):
               if 955 <= i + 1 <= 975:
-                  # 如果发现形如未闭合的 call，可以尝试把多余的冲突符号替换掉
-                  # 比如有些旧内核 Makefile 在 964 行调用了未兼容的宏，可以直接注释或修复括号
                   if "call" in line and line.count("(") != line.count(")"):
-                      print(f"发现第 {i+1} 行括号不平衡: (数量={line.count(\"(\")}, )数量={line.count(\")\")}")
-                      # 自动补齐缺失的右括号，或者去掉引起冲突的部分
+                      print(f"发现第 {i+1} 行括号不平衡")
                       if line.count("(") > line.count(")"):
                           line = line.rstrip() + ")" * (line.count("(") - line.count(")")) + "\n"
-                          print(f"自动修复后: {line}")
               new_lines.append(line)
 
           with open(makefile_path, "w", encoding="utf-8") as f:
