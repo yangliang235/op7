@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "===== 删除前包含 -Werror 的文件 ====="
+          echo "===== 删除前包含 -Werror 的文件 ===------+
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
 
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null | while read -r f; do
@@ -94,29 +94,48 @@ jobs:
 
       - name: Fix Makefile call syntax error for modern Make
         run: |
-          set -euxo pipefail
-          MAKEFILE="Makefile"
-          if [ -f "$MAKEFILE" ]; then
-            echo "===== 修复前第 960-970 行内容 ====="
-            sed -n '960,970p' "$MAKEFILE" || true
-            
-            # 针对旧版一加内核 Makefile 第 964 行左右 call 函数括号不匹配的通用修复
-            # 常见形式：由于新版 GNU Make 语法收紧，将多余或不匹配的括号进行安全替换
-            sed -i '964s/\$(call[[:space:]]*\([^)]*\)[[:space:]]*\)/\1/g' "$MAKEFILE" || true
-            
-            # 如果具体行数受不同源码版本影响有轻微偏移，也可以使用通用 Python 脚本兜底清理语法冲突
-            python3 -c '
-            with open("Makefile", "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-            # 检查并输出包含 unterminated call 的行附近
-            for i, line in enumerate(lines):
-                if "unterminated call" in line or (950 <= i <= 980 and "call" in line):
-                    print(f"Line {i+1}: {line.strip()}")
-            ' || true
-            
-            echo "===== 修复后检查 ====="
-            sed -n '960,970p' "$MAKEFILE" || true
-          fi
+          set -eu
+          python3 -c '
+          makefile_path = "Makefile"
+          with open(makefile_path, "r", encoding="utf-8", errors="ignore") as f:
+              lines = f.readlines()
+
+          print("===== 修复前 Makefile 第 955 至 975 行 =====")
+          for idx in range(954, min(975, len(lines))):
+              print(f"{idx+1}: {lines[idx]}", end="")
+
+          # 针对第 964 行左右 unterminated call to function call 的精准修复
+          # 通常是因为高版本 Make 对旧内核某些宏的括号或换行符解析冲突
+          fixed = False
+          for idx in range(max(0, 960-1), min(len(lines), 970)):
+              line = lines[idx]
+              if "call" in line:
+                  print(f"\n正在检查并修复第 {idx+1} 行...")
+                  # 如果括号不匹配，或者包含特定旧语法，这里进行安全处理
+                  # 常见做法：如果该行有未闭合的括号，尝试补齐或简化
+                  # 我们可以将这一行或相关的宏调用转换为安全形态，或者如果它是调试/不关键的行直接注释/替换
+                  # 打印详细信息便于排查
+                  print(f"原始行: {line}")
+
+          # 如果用户 Makefile 第 964 行具体的 call 存在括号问题，可以通过以下通用逻辑调整：
+          # 这里直接对整个 955-970 范围内的常见语法错误进行扫描替换
+          new_lines = []
+          for i, line in enumerate(lines):
+              if 955 <= i + 1 <= 975:
+                  # 如果发现形如未闭合的 call，可以尝试把多余的冲突符号替换掉
+                  # 比如有些旧内核 Makefile 在 964 行调用了未兼容的宏，可以直接注释或修复括号
+                  if "call" in line and line.count("(") != line.count(")"):
+                      print(f"发现第 {i+1} 行括号不平衡: (数量={line.count(\"(\")}, )数量={line.count(\")\")}")
+                      # 自动补齐缺失的右括号，或者去掉引起冲突的部分
+                      if line.count("(") > line.count(")"):
+                          line = line.rstrip() + ")" * (line.count("(") - line.count(")")) + "\n"
+                          print(f"自动修复后: {line}")
+              new_lines.append(line)
+
+          with open(makefile_path, "w", encoding="utf-8") as f:
+              f.writelines(new_lines)
+          print("===== Python 修复完成 ====="
+          '
 
       - name: Configure kernel and merge fragments
         run: |
