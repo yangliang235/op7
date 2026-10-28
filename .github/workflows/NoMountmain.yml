@@ -10,7 +10,7 @@ on:
       make_target:
         description: '编译目标'
         required: true
-        default: 'Image.gz-dtb'
+        default: 'Image.gz'
       nomount_branch:
         description: 'NoMount 分支'
         required: true
@@ -32,7 +32,7 @@ env:
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
   DEFCONFIG: ${{ github.event.inputs.defconfig || 'op7-perf_defconfig' }}
-  MAKE_TARGET: ${{ github.event.inputs.make_target || 'Image.gz-dtb' }}
+  MAKE_TARGET: ${{ github.event.inputs.make_target || 'Image.gz' }}
   NOMOUNT_BRANCH: ${{ github.event.inputs.nomount_branch || 'dev' }}
 
 jobs:
@@ -137,7 +137,6 @@ jobs:
 
           make ARCH=arm64 O=out "${DEFCONFIG}"
 
-          # 核心修复：关闭会引发链接报错的 MODVERSIONS
           ./scripts/config --file out/.config -d MODVERSIONS || true
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
@@ -158,7 +157,6 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
-          # 再次确保 merge 后 MODVERSIONS 处于关闭状态
           ./scripts/config --file out/.config -d MODVERSIONS || true
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
