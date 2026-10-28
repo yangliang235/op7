@@ -100,22 +100,27 @@ jobs:
           with open(makefile_path, "r", encoding="utf-8", errors="ignore") as f:
               lines = f.readlines()
 
-          print("===== 修复前 Makefile 第 955 至 975 行 =====")
-          for idx in range(954, min(975, len(lines))):
-              print(f"{idx+1}: {lines[idx]}", end="")
-
+          print("===== 扫描并修复 Makefile 中的不匹配 call 宏 =====")
           new_lines = []
           for i, line in enumerate(lines):
-              if 955 <= i + 1 <= 975:
-                  if "call" in line and line.count("(") != line.count(")"):
-                      print(f"发现第 {i+1} 行括号不平衡")
-                      if line.count("(") > line.count(")"):
-                          line = line.rstrip() + ")" * (line.count("(") - line.count(")")) + "\n"
+              # 自动扫描 950 到 1000 行左右的范围，如果包含有语法问题的 call 则进行修复或注释
+              if 950 <= i + 1 <= 1000 and "call" in line:
+                  print(f"检查第 {i+1} 行: {line.strip()}")
+                  # 如果括号明显不匹配（左括号多于右括号且没有正确闭合）
+                  if line.count("(") > line.count(")"):
+                      # 强制补齐右括号
+                      diff = line.count("(") - line.count(")")
+                      line = line.rstrip() + ")" * diff + "\n"
+                      print(f"-> 修复后: {line.strip()}")
+                  elif "unterminated" in line or (line.strip().startswith("$(call") and not line.strip().endswith(")")):
+                      # 如果直接是不完整的 call 语句，将其安全注释掉以防中断编译
+                      print(f"-> 注释掉存在潜在冲突的行: {line.strip()}")
+                      line = "# " + line
               new_lines.append(line)
 
           with open(makefile_path, "w", encoding="utf-8") as f:
               f.writelines(new_lines)
-          print("===== Python 修复完成 =====")
+          print("===== Makefile 语法强力修复完成 ====="
           '
 
       - name: Configure kernel and merge fragments
