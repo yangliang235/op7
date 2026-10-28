@@ -137,6 +137,8 @@ jobs:
 
           make ARCH=arm64 O=out "${DEFCONFIG}"
 
+          # 核心修复：关闭会引发链接报错的 MODVERSIONS
+          ./scripts/config --file out/.config -d MODVERSIONS || true
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
           ./scripts/config --file out/.config -d WERROR || true
@@ -156,12 +158,14 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
+          # 再次确保 merge 后 MODVERSIONS 处于关闭状态
+          ./scripts/config --file out/.config -d MODVERSIONS || true
           ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
           ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
           make ARCH=arm64 O=out olddefconfig
 
           echo "===== 关键配置 ====="
-          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|CC_STACKPROTECTOR|WERROR)' out/.config || true
+          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|MODVERSIONS|CC_STACKPROTECTOR|WERROR)' out/.config || true
 
           if ! grep -q '^CONFIG_NOMOUNT=y' out/.config; then
             echo "警告：CONFIG_NOMOUNT 没有保留在 out/.config 中"
