@@ -183,7 +183,7 @@ jobs:
             WERROR=0 \
             KCFLAGS="-Wno-error" \
             -j"$(nproc)" \
-            "${MAKE_TARGET}" 2>&1 | tee build.log
+            "${MAKE_TARGET}" dtbs 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
 
           if [ "$status" -ne 0 ]; then
@@ -200,14 +200,23 @@ jobs:
           KERNEL_IMAGE="out/arch/arm64/boot/${MAKE_TARGET}"
           if [ ! -f "${KERNEL_IMAGE}" ]; then
             echo "找不到内核镜像: ${KERNEL_IMAGE}"
-            echo "out/arch/arm64/boot 下的文件："
-            find out/arch/arm64/boot -maxdepth 1 -type f | head -30
             exit 1
           fi
 
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
+          # 1. 复制 Image.gz 镜像
           cp "${KERNEL_IMAGE}" AnyKernel3/
+
+          # 2. 查找并合并/复制 dtb 设备树文件（与作者结构完全一致）
+          DTB_FIND=$(find out/arch/arm64/boot/dts/ -name "*.dtb" 2>/dev/null | head -n 1 || true)
+          if [ -f "out/arch/arm64/boot/dtb" ]; then
+            cp "out/arch/arm64/boot/dtb" AnyKernel3/
+          elif [ -n "$DTB_FIND" ]; then
+            cat out/arch/arm64/boot/dts/qcom/*.dtb > AnyKernel3/dtb 2>/dev/null || cp "$DTB_FIND" AnyKernel3/dtb
+          else
+            echo "警告：未找到 dtb 文件"
+          fi
 
           {
             echo 'kernel.string=blu_spark OP7 APatch NoMount Kernel'
@@ -226,7 +235,7 @@ jobs:
             echo 'ramdisk_compression=auto;'
             echo 'patch_vbmeta=0;'
             echo 'patch_dtbo=0;'
-            echo 'patch_dtb=0;'
+            echo 'patch_dtb=1;'
           } > AnyKernel3/anykernel.sh
 
           rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/LICENSE
