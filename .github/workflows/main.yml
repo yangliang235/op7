@@ -100,47 +100,47 @@ jobs:
         
         # 4. 写入可完美刷入的 AnyKernel3 脚本配置
         cat << 'EOF' > AnyKernel3/anykernel.sh
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
+        ### AnyKernel3 Ramdisk Mod Script
+        ## osm0sis @ xda-developers
 
-### AnyKernel setup
-# begin properties
-properties() { '
-kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel)
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=OnePlus7
-device.name2=OnePlus7Pro
-device.name3=OnePlus7T
-device.name4=OnePlus7TPro
-device.name5=hotdogb
-device.name6=hotdog
-device.name7=guacamole
-device.name8=guacamoleb
-supported.versions=
-supported.patchlevels=
-'; } # end properties
+        ### AnyKernel setup
+        # begin properties
+        properties() { '
+        kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel)
+        do.devicecheck=1
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=OnePlus7
+        device.name2=OnePlus7Pro
+        device.name3=OnePlus7T
+        device.name4=OnePlus7TPro
+        device.name5=hotdogb
+        device.name6=hotdog
+        device.name7=guacamole
+        device.name8=guacamoleb
+        supported.versions=
+        supported.patchlevels=
+        '; } # end properties
 
-### AnyKernel install
+        ### AnyKernel install
 
-## boot shell variables
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=1;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
+        ## boot shell variables
+        block=/dev/block/bootdevice/by-name/boot;
+        is_slot_device=1;
+        ramdisk_compression=auto;
+        patch_vbmeta_flag=auto;
 
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh;
+        # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+        . tools/ak3-core.sh;
 
-# boot install
-split_boot;
+        # boot install
+        split_boot;
 
-flash_boot;
-## end boot install
-EOF
+        flash_boot;
+        ## end boot install
+        EOF
 
     - name: Build Kernel & Package Zip
       run: |
