@@ -10,7 +10,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
@@ -27,20 +27,22 @@ jobs:
         fetch-depth: 1
     - name: Set up ccache
       uses: hendrikmuhs/ccache-action@v1.2
-      
+
     - name: Remove unnecessary files
       run: |
         sudo rm -rf /opt/ghc
         sudo rm -rf "/usr/local/share/boost"
         sudo rm -rf /usr/share/dotnet
         sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
     - name: Install dependencies
       run: |
-        sudo apt-get update -y 
+        sudo apt-get update -y
         sudo apt install gcc-aarch64-linux-gnu -y
         sudo apt install gcc-arm-linux-gnueabi -y
-        sudo apt install clang-14 -y
+        sudo apt install clang-14 lld-14 llvm-14 -y
         sudo apt install binutils make python3 libssl-dev build-essential bc bison flex unzip libssl-dev ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs zip -y
+        sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
         git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64 --depth=1
         git clone https://github.com/snowwolf725/AnyKernel3 -b oneplus7 --depth=1
         rm -rf AnyKernel3/.git
@@ -52,7 +54,7 @@ jobs:
 
         # 2. 原生集成 Sakion-Team/Re-Kernel
         git clone https://github.com/Sakion-Team/Re-Kernel.git rekernel_tmp --depth=1
-        
+
         # 将 Re-Kernel 驱动源码放置到 drivers/rekernel
         if [ -d "rekernel_tmp/Integrate/drivers/rekernel" ]; then
           cp -rf rekernel_tmp/Integrate/drivers/rekernel drivers/
@@ -61,7 +63,7 @@ jobs:
         elif [ -d "rekernel_tmp/rekernel" ]; then
           cp -rf rekernel_tmp/rekernel drivers/
         fi
-        
+
         # 预防性修复：解决 4.14 内核回移植 cgroup freezer v2 导致的 JOBCTL_TRAP_FREEZE 缺失问题
         if [ -f "drivers/rekernel/rekernel.h" ]; then
           if ! grep -q "sched/jobctl.h" drivers/rekernel/rekernel.h; then
@@ -76,28 +78,29 @@ jobs:
         elif [ -f "rekernel_tmp/Integrate/main.py" ]; then
           python3 rekernel_tmp/Integrate/main.py .
         fi
-        
+
         rm -rf rekernel_tmp
 
-        # 3. 写入内核配置开关
+        # 3. 写入内核配置开关（用 scripts/config，避免 override 警告）
         CONFIG_FILE="arch/arm64/configs/$KERNEL_DEFCONFIG"
         if [ -f "$CONFIG_FILE" ]; then
-          echo "CONFIG_KALLSYMS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KALLSYMS_ALL=y" >> "$CONFIG_FILE"
-          echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
-          echo "CONFIG_NOMOUNT=y" >> "$CONFIG_FILE"
-          echo "CONFIG_OVERLAY_FS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$CONFIG_FILE"
-          echo "CONFIG_OVERLAY_FS_METACOPY=y" >> "$CONFIG_FILE"
-          echo "CONFIG_NAMESPACES=y" >> "$CONFIG_FILE"
-          echo "CONFIG_UTS_NS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_IPC_NS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_USER_NS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_PID_NS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_NET_NS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_REKERNEL=y" >> "$CONFIG_FILE"
+          sh scripts/config --file "$CONFIG_FILE" \
+            --enable KALLSYMS \
+            --enable KALLSYMS_ALL \
+            --enable ZRAM_WRITEBACK \
+            --enable NOMOUNT \
+            --enable OVERLAY_FS \
+            --enable OVERLAY_FS_REDIRECT_DIR \
+            --enable OVERLAY_FS_METACOPY \
+            --enable NAMESPACES \
+            --enable UTS_NS \
+            --enable IPC_NS \
+            --enable USER_NS \
+            --enable PID_NS \
+            --enable NET_NS \
+            --enable REKERNEL
         fi
-        
+
         # 4. 写入可完美刷入的 AnyKernel3 脚本配置
         cat << 'EOF' > AnyKernel3/anykernel.sh
         ### AnyKernel3 Ramdisk Mod Script
@@ -150,9 +153,11 @@ jobs:
         export LD=ld.lld
         export BRAND_SHOW_FLAG=oneplus
         export TARGET_PRODUCT=msmnile
-        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14"
-        make $KERNEL_CMDLINE CC="ccache clang-14" -j$(nproc --all)
-        
+        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14" LD=ld.lld
+        make $KERNEL_CMDLINE CC="ccache clang-14" LD=ld.lld -j$(nproc --all)
+
+        ls -la out/arch/arm64/boot/
+
         cp out/arch/arm64/boot/Image AnyKernel3/
         cd AnyKernel3
         zip -r9 "../blu_spark-11-$(TZ=Asia/Shanghai date +%Y%m%d).zip" * -x README.md
