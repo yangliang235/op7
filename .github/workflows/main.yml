@@ -84,6 +84,8 @@ jobs:
         # 3. 写入内核配置开关（用 scripts/config，避免 override 警告）
         CONFIG_FILE="arch/arm64/configs/$KERNEL_DEFCONFIG"
         if [ -f "$CONFIG_FILE" ]; then
+          # SM8150 是 8 核；同时满足 sched.h tracepoint 对 NR_CPUS <= 32 的要求
+          sh scripts/config --file "$CONFIG_FILE" --set-val NR_CPUS 8
           sh scripts/config --file "$CONFIG_FILE" \
             --enable KALLSYMS \
             --enable KALLSYMS_ALL \
@@ -99,6 +101,9 @@ jobs:
             --enable PID_NS \
             --enable NET_NS \
             --enable REKERNEL
+
+          echo "--- NR_CPUS after config ---"
+          grep -n "CONFIG_NR_CPUS" "$CONFIG_FILE" || true
         fi
 
         # 4. 写入可完美刷入的 AnyKernel3 脚本配置
@@ -154,6 +159,10 @@ jobs:
         export BRAND_SHOW_FLAG=oneplus
         export TARGET_PRODUCT=msmnile
         make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14" LD=ld.lld
+
+        echo "--- NR_CPUS in generated .config ---"
+        grep -n "CONFIG_NR_CPUS" out/.config || true
+
         make $KERNEL_CMDLINE CC="ccache clang-14" LD=ld.lld -j$(nproc --all)
 
         ls -la out/arch/arm64/boot/
