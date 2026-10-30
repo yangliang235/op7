@@ -1,249 +1,166 @@
-name: Build OP7 APatch + NoMount kernel (flashable zip)
-
+name: Build blu_spark-11
 on:
   workflow_dispatch:
-    inputs:
-      defconfig:
-        description: '内核 defconfig（不带 arch/arm64/configs/ 前缀）'
-        required: true
-        default: 'op7-perf_defconfig'
-      make_target:
-        description: '编译目标'
-        required: true
-        default: 'Image.gz'
-      nomount_branch:
-        description: 'NoMount 分支'
-        required: true
-        default: 'dev'
   push:
-    branches: [ main ]
-    paths:
-      - 'fragment/apatch.fragment'
-      - '.github/workflows/main.yml'
-
-permissions:
-  contents: read
-
-concurrency:
-  group: op7-apatch-nomount-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  ARCH: arm64
-  CROSS_COMPILE: aarch64-linux-gnu-
-  DEFCONFIG: ${{ github.event.inputs.defconfig || 'op7-perf_defconfig' }}
-  MAKE_TARGET: ${{ github.event.inputs.make_target || 'Image.gz' }}
-  NOMOUNT_BRANCH: ${{ github.event.inputs.nomount_branch || 'dev' }}
+    branches:
+      - blu_spark-11
+  pull_request:
+    branches:
+      - blu_spark-11
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 150
-
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "blu_spark_defconfig"
+      KERNEL_CMDLINE: "ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-androidkernel- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 O=out"
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        repository: yangliang235/op7
+        submodules: 'true'
+        fetch-depth: 1
+    - name: Set up ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      
+    - name: Remove unnecessary files
+      run: |
+        sudo rm -rf /opt/ghc
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+    - name: Install dependencies
+      run: |
+        sudo apt-get update -y 
+        sudo apt install gcc-aarch64-linux-gnu -y
+        sudo apt install gcc-arm-linux-gnueabi -y
+        sudo apt install clang-14 -y
+        sudo apt install binutils make python3 libssl-dev build-essential bc bison flex unzip libssl-dev ca-certificates xz-utils mkbootimg cpio device-tree-compiler git git-lfs zip -y
+        git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64 --depth=1
+        git clone https://github.com/snowwolf725/AnyKernel3 -b oneplus7 --depth=1
+        rm -rf AnyKernel3/.git
 
-      - name: Install build dependencies (with GCC 9)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            zip unzip git curl python3 \
-            gcc-9-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            device-tree-compiler
+    - name: Integrate NoMount, Re-Kernel Natively & Configure Kernel
+      run: |
+        # 1. 原生集成 NoMount 源码
+        curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh | bash
 
-          # 强制将编译器指向 gcc-9，防止现代 GCC 导致老内核引导崩溃
-          echo "CC=aarch64-linux-gnu-gcc-9" >> $GITHUB_ENV
-          echo "LD=aarch64-linux-gnu-ld.bfd" >> $GITHUB_ENV
-
-      - name: Fix adjust_window signature
-        run: |
-          set -euxo pipefail
-          FILE="drivers/oneplus/oneplus_healthinfo/oneplus_healthinfo.c"
-          if [ -f "$FILE" ]; then
-            sed -i -E 's/static void adjust_window[[:space:]]*\([^)]*\)[[:space:]]*\{/static void adjust_window(unsigned long data) {/' "$FILE"
-            echo "===== 修复后确认 ====="
-            grep -n 'adjust_window' "$FILE" || true
-          else
-            echo "找不到 $FILE，跳过"
+        # 2. 原生集成 Sakion-Team/Re-Kernel
+        git clone https://github.com/Sakion-Team/Re-Kernel.git rekernel_tmp --depth=1
+        
+        # 将 Re-Kernel 驱动源码放置到 drivers/rekernel
+        if [ -d "rekernel_tmp/Integrate/drivers/rekernel" ]; then
+          cp -rf rekernel_tmp/Integrate/drivers/rekernel drivers/
+        elif [ -d "rekernel_tmp/Integrate/rekernel" ]; then
+          cp -rf rekernel_tmp/Integrate/rekernel drivers/
+        elif [ -d "rekernel_tmp/rekernel" ]; then
+          cp -rf rekernel_tmp/rekernel drivers/
+        fi
+        
+        # 预防性修复：解决 4.14 内核回移植 cgroup freezer v2 导致的 JOBCTL_TRAP_FREEZE 缺失问题
+        if [ -f "drivers/rekernel/rekernel.h" ]; then
+          if ! grep -q "sched/jobctl.h" drivers/rekernel/rekernel.h; then
+            echo "Injecting #include <linux/sched/jobctl.h> into drivers/rekernel/rekernel.h..."
+            sed -i '1i #include <linux/sched/jobctl.h>' drivers/rekernel/rekernel.h
           fi
+        fi
 
-      - name: Integrate NoMount into kernel source
-        run: |
-          set -euxo pipefail
-          curl -fsSL "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/${NOMOUNT_BRANCH}/kernel/setup.sh" | bash -s "${NOMOUNT_BRANCH}"
-          echo "===== 确认 NoMount 集成 ====="
-          test -d fs/nomount
-          grep -n 'nomount' fs/Kconfig || true
-          grep -n 'nomount' fs/Makefile || true
-          ls fs/nomount
+        # 运行 Re-Kernel 自动化 Hook 脚本
+        if [ -f "rekernel_tmp/Integrate/patch.py" ]; then
+          python3 rekernel_tmp/Integrate/patch.py .
+        elif [ -f "rekernel_tmp/Integrate/main.py" ]; then
+          python3 rekernel_tmp/Integrate/main.py .
+        fi
+        
+        rm -rf rekernel_tmp
 
-      - name: Remove -Werror from all Makefiles
-        run: |
-          set -euxo pipefail
+        # 3. 写入内核配置开关
+        CONFIG_FILE="arch/arm64/configs/$KERNEL_DEFCONFIG"
+        if [ -f "$CONFIG_FILE" ]; then
+          echo "CONFIG_KALLSYMS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KALLSYMS_ALL=y" >> "$CONFIG_FILE"
+          echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
+          echo "CONFIG_NOMOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_OVERLAY_FS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$CONFIG_FILE"
+          echo "CONFIG_OVERLAY_FS_METACOPY=y" >> "$CONFIG_FILE"
+          echo "CONFIG_NAMESPACES=y" >> "$CONFIG_FILE"
+          echo "CONFIG_UTS_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_IPC_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_USER_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_PID_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_NET_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_REKERNEL=y" >> "$CONFIG_FILE"
+        fi
+        
+        # 4. 写入可完美刷入的 AnyKernel3 脚本配置
+        cat << 'EOF' > AnyKernel3/anykernel.sh
+### AnyKernel3 Ramdisk Mod Script
+## osm0sis @ xda-developers
 
-          echo "===== 删除前包含 -Werror 的文件 ====="
-          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
+### AnyKernel setup
+# begin properties
+properties() { '
+kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel)
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=OnePlus7
+device.name2=OnePlus7Pro
+device.name3=OnePlus7T
+device.name4=OnePlus7TPro
+device.name5=hotdogb
+device.name6=hotdog
+device.name7=guacamole
+device.name8=guacamoleb
+supported.versions=
+supported.patchlevels=
+'; } # end properties
 
-          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null | while read -r f; do
-            sed -i 's/-Werror[^ ]*//g' "$f"
-            echo "已处理 $f"
-          done
+### AnyKernel install
 
-          echo "===== 删除后仍包含 -Werror 的文件（应为空） ====="
-          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
+## boot shell variables
+block=/dev/block/bootdevice/by-name/boot;
+is_slot_device=1;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
 
-      - name: Fix Makefile call syntax error for modern Make
-        run: |
-          set -eu
-          python3 -c '
-          makefile_path = "Makefile"
-          with open(makefile_path, "r", encoding="utf-8", errors="ignore") as f:
-              lines = f.readlines()
+# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+. tools/ak3-core.sh;
 
-          print("===== 扫描并修复 Makefile 中的不匹配 call 宏 =====")
-          new_lines = []
-          for i, line in enumerate(lines):
-              if 950 <= i + 1 <= 1000 and "call" in line:
-                  print(f"检查第 {i+1} 行: {line.strip()}")
-                  if line.count("(") > line.count(")"):
-                      diff = line.count("(") - line.count(")")
-                      line = line.rstrip() + ")" * diff + "\n"
-                      print(f"-> 修复后: {line.strip()}")
-                  elif "unterminated" in line or (line.strip().startswith("$(call") and not line.strip().endswith(")")):
-                      print(f"-> 注释掉存在潜在冲突的行: {line.strip()}")
-                      line = "# " + line
-              new_lines.append(line)
+# boot install
+split_boot;
 
-          with open(makefile_path, "w", encoding="utf-8") as f:
-              f.writelines(new_lines)
-          print("===== Makefile 语法强力修复完成 =====")
-          '
+flash_boot;
+## end boot install
+EOF
 
-      - name: Configure kernel and merge fragments
-        run: |
-          set -euxo pipefail
+    - name: Build Kernel & Package Zip
+      run: |
+        export PATH=$(pwd)/clang/bin/:$(pwd)/aarch64/bin/:$PATH
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export LD=ld.lld
+        export BRAND_SHOW_FLAG=oneplus
+        export TARGET_PRODUCT=msmnile
+        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14"
+        make $KERNEL_CMDLINE CC="ccache clang-14" -j$(nproc --all)
+        
+        cp out/arch/arm64/boot/Image AnyKernel3/
+        cd AnyKernel3
+        zip -r9 "../blu_spark-11-$(TZ=Asia/Shanghai date +%Y%m%d).zip" * -x README.md
+        cd ..
 
-          if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
-            echo "找不到 defconfig: arch/arm64/configs/${DEFCONFIG}"
-            exit 1
-          fi
-
-          if [ ! -f "fragment/apatch.fragment" ]; then
-            echo "找不到 fragment/apatch.fragment"
-            exit 1
-          fi
-
-          make ARCH=arm64 O=out "${DEFCONFIG}"
-
-          ./scripts/config --file out/.config -d MODVERSIONS || true
-          ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
-          ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
-          ./scripts/config --file out/.config -d WERROR || true
-          ./scripts/config --file out/.config -d CC_WERROR || true
-
-          echo 'CONFIG_NOMOUNT=y' > fragment/nomount.fragment
-
-          {
-            echo 'CONFIG_CC_STACKPROTECTOR_NONE=y'
-            echo '# CONFIG_CC_STACKPROTECTOR_STRONG is not set'
-          } > fragment/stackprotector.fragment
-
-          ./scripts/kconfig/merge_config.sh -m -O out out/.config \
-            fragment/apatch.fragment \
-            fragment/nomount.fragment \
-            fragment/stackprotector.fragment
-
-          make ARCH=arm64 O=out olddefconfig
-
-          ./scripts/config --file out/.config -d MODVERSIONS || true
-          ./scripts/config --file out/.config -d CC_STACKPROTECTOR_STRONG
-          ./scripts/config --file out/.config -e CC_STACKPROTECTOR_NONE
-          make ARCH=arm64 O=out olddefconfig
-
-          echo "===== 关键配置检查 ====="
-          grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|MODVERSIONS)' out/.config || true
-
-      - name: Build kernel
-        run: |
-          set -o pipefail
-          make ARCH=arm64 \
-            CROSS_COMPILE="${CROSS_COMPILE}" \
-            CC="${CC}" \
-            O=out \
-            WERROR=0 \
-            KCFLAGS="-Wno-error" \
-            -j"$(nproc)" \
-            "${MAKE_TARGET}" 2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
-
-          if [ "$status" -ne 0 ]; then
-            echo "===== 编译失败 ====="
-            grep -i "error:" build.log || true
-            exit "$status"
-          fi
-
-      - name: Prepare AnyKernel3 flashable zip
-        run: |
-          set -euxo pipefail
-
-          KERNEL_IMAGE="out/arch/arm64/boot/${MAKE_TARGET}"
-          if [ ! -f "${KERNEL_IMAGE}" ]; then
-            echo "找不到内核镜像: ${KERNEL_IMAGE}"
-            exit 1
-          fi
-
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-
-          cp "${KERNEL_IMAGE}" AnyKernel3/
-
-          # 如果你在仓库里放了作者提取出来的可靠 dtb，会自动优先打包进去
-          if [ -f "dtb" ]; then
-            cp "dtb" AnyKernel3/
-          elif [ -f "fragment/dtb" ]; then
-            cp "fragment/dtb" AnyKernel3/dtb
-          fi
-
-          {
-            echo 'kernel.string=blu_spark OP7 APatch NoMount Kernel'
-            echo 'do.devicecheck=1'
-            echo 'do.modules=0'
-            echo 'do.systemless=1'
-            echo 'do.cleanup=1'
-            echo 'do.cleanuponabort=0'
-            echo 'device.name1=guacamole'
-            echo 'device.name2=guacamoleb'
-            echo 'device.name3=hotdog'
-            echo 'device.name4=hotdogb'
-            echo 'device.name5=hotdogg'
-            echo 'block=/dev/block/bootdevice/by-name/boot;'
-            echo 'is_slot_device=auto;'
-            echo 'ramdisk_compression=auto;'
-            echo 'patch_vbmeta=0;'
-            echo 'patch_dtbo=0;'
-            echo 'patch_dtb=1;'
-          } > AnyKernel3/anykernel.sh
-
-          rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/LICENSE
-
-          ZIP_NAME="op7-apatch-nomount-kernel-${{ github.run_number }}.zip"
-          cd AnyKernel3
-          zip -r9 "../${ZIP_NAME}" *
-          cd ..
-
-          mkdir -p artifact
-          mv "${ZIP_NAME}" artifact/
-          cp out/.config artifact/kernel.config
-
-          echo "===== artifact 内容 ====="
-          ls -lh artifact
-
-      - name: Upload flashable zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: op7-apatch-nomount-flashable-zip-${{ github.run_number }}
-          path: artifact/
-          if-no-files-found: error
+    - name: Upload Kernel Zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: blu_spark-11
+        path: "*.zip"
+        overwrite: true
