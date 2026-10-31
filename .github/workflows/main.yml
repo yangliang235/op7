@@ -101,21 +101,24 @@ jobs:
 
       - name: Strip LLD-only relr option (GNU ld doesn't support)
         run: |
-          set -euxo pipefail
+          set -u
+          PATTERN='pack-dyn-relocs'
+          INCL=(--include='Makefile' --include='*.mk' --include='Kbuild')
+          EXCL=(--exclude-dir='.git' --exclude-dir='.github')
+
           echo "===== 清理前含 pack-dyn-relocs 的文件 ====="
-          grep -rn -- 'pack-dyn-relocs' \
-            --include='Makefile' --include='*.mk' --include='Kbuild' \
-            . || true
-          grep -rln -- 'pack-dyn-relocs' \
-            --include='Makefile' --include='*.mk' --include='Kbuild' \
-            . | while read -r f; do
+          grep -rn "${INCL[@]}" "${EXCL[@]}" -- "$PATTERN" . 2>/dev/null || true
+
+          FILES=$(grep -rln "${INCL[@]}" "${EXCL[@]}" -- "$PATTERN" . 2>/dev/null || true)
+          if [ -n "${FILES}" ]; then
+            echo "${FILES}" | while read -r f; do
               sed -i 's|--pack-dyn-relocs=relr||g' "$f"
               echo "已清理 $f"
             done
+          fi
+
           echo "===== 清理后仍含 pack-dyn-relocs 的文件（应为空） ====="
-          grep -rn -- 'pack-dyn-relocs' \
-            --include='Makefile' --include='*.mk' --include='Kbuild' \
-            . || true
+          grep -rn "${INCL[@]}" "${EXCL[@]}" -- "$PATTERN" . 2>/dev/null || true
 
       - name: Fix Makefile call syntax error for modern Make
         run: |
