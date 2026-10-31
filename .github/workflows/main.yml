@@ -81,14 +81,16 @@ jobs:
 
         rm -rf rekernel_tmp
 
-        # 3. 写入内核配置开关（用 scripts/config，避免 override 警告）
+        # 3. 写入内核配置开关（对 defconfig 文件操作）
         CONFIG_FILE="arch/arm64/configs/$KERNEL_DEFCONFIG"
         if [ -f "$CONFIG_FILE" ]; then
-          # SM8150 是 8 核；同时满足 sched.h tracepoint 对 NR_CPUS <= 32 的要求
-          sh scripts/config --file "$CONFIG_FILE" --set-val NR_CPUS 8
           sh scripts/config --file "$CONFIG_FILE" \
             --enable KALLSYMS \
             --enable KALLSYMS_ALL \
+            --enable KPROBES \
+            --enable MODULES \
+            --enable IKCONFIG \
+            --enable IKCONFIG_PROC \
             --enable ZRAM_WRITEBACK \
             --enable NOMOUNT \
             --enable OVERLAY_FS \
@@ -101,9 +103,6 @@ jobs:
             --enable PID_NS \
             --enable NET_NS \
             --enable REKERNEL
-
-          echo "--- NR_CPUS after config ---"
-          grep -n "CONFIG_NR_CPUS" "$CONFIG_FILE" || true
         fi
 
         # 4. 写入可完美刷入的 AnyKernel3 脚本配置
@@ -114,7 +113,7 @@ jobs:
         ### AnyKernel setup
         # begin properties
         properties() { '
-        kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel)
+        kernel.string=blu_spark-11 (APatch + NoMount + Re-Kernel)
         do.devicecheck=1
         do.modules=0
         do.systemless=1
@@ -158,11 +157,23 @@ jobs:
         export LD=ld.lld
         export BRAND_SHOW_FLAG=oneplus
         export TARGET_PRODUCT=msmnile
+
+        # 生成 out/.config
         make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14" LD=ld.lld
 
-        echo "--- NR_CPUS in generated .config ---"
+        # 关键修复：直接改生成的 .config，把 NR_CPUS 从 64 降到 8
+        echo "--- NR_CPUS before fix ---"
+        grep -n "CONFIG_NR_CPUS" out/.config || true
+        sh scripts/config --file out/.config --set-val NR_CPUS 8
+        make $KERNEL_CMDLINE olddefconfig CC="ccache clang-14" LD=ld.lld
+        echo "--- NR_CPUS after fix ---"
         grep -n "CONFIG_NR_CPUS" out/.config || true
 
+        # APatch 依赖项确认
+        echo "--- APatch kernel configs ---"
+        grep -E "CONFIG_(KALLSYMS|KALLSYMS_ALL|KPROBES|MODULES|IKCONFIG)" out/.config || true
+
+        # 正式编译
         make $KERNEL_CMDLINE CC="ccache clang-14" LD=ld.lld -j$(nproc --all)
 
         ls -la out/arch/arm64/boot/
