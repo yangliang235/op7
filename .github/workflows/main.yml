@@ -52,11 +52,20 @@ jobs:
           sudo apt-get install -y \
             build-essential bc bison flex libssl-dev libelf-dev \
             zip unzip git curl python3 \
-            gcc-9-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-11-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             device-tree-compiler
-          # 强制将编译器指向 gcc-11，防止现代 GCC 导致老内核引导崩溃
+          # 将编译器指向实际安装的 gcc-11（与安装包提供的可执行文件名一致）
           echo "CC=aarch64-linux-gnu-gcc-11" >> $GITHUB_ENV
           echo "LD=aarch64-linux-gnu-ld.bfd" >> $GITHUB_ENV
+
+      - name: Verify toolchain
+        run: |
+          set -euxo pipefail
+          command -v aarch64-linux-gnu-gcc-11
+          aarch64-linux-gnu-gcc-11 --version
+          command -v aarch64-linux-gnu-ld.bfd
+          aarch64-linux-gnu-ld.bfd --version | head -n 1
+
       - name: Fix adjust_window signature
         run: |
           set -euxo pipefail
@@ -68,6 +77,7 @@ jobs:
           else
             echo "找不到 $FILE，跳过"
           fi
+
       - name: Integrate NoMount into kernel source
         run: |
           set -euxo pipefail
@@ -77,6 +87,7 @@ jobs:
           grep -n 'nomount' fs/Kconfig || true
           grep -n 'nomount' fs/Makefile || true
           ls fs/nomount
+
       - name: Remove -Werror from all Makefiles
         run: |
           set -euxo pipefail
@@ -88,6 +99,7 @@ jobs:
           done
           echo "===== 删除后仍包含 -Werror 的文件（应为空） ====="
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec grep -l -- '-Werror' {} + 2>/dev/null || true
+
       - name: Fix Makefile call syntax error for modern Make
         run: |
           set -eu
@@ -112,6 +124,7 @@ jobs:
               f.writelines(new_lines)
           print("===== Makefile 语法强力修复完成 =====")
           '
+
       - name: Configure kernel and merge fragments
         run: |
           set -euxo pipefail
@@ -145,6 +158,7 @@ jobs:
           make ARCH=arm64 O=out olddefconfig
           echo "===== 关键配置检查 ====="
           grep -E 'CONFIG_(APATCH|KPATCH|KPM|KSU|NOMOUNT|MODVERSIONS)' out/.config || true
+
       - name: Build kernel
         run: |
           set -o pipefail
@@ -153,7 +167,7 @@ jobs:
             CC="${CC}" \
             O=out \
             WERROR=0 \
-            KCFLAGS="-Wno-error" \
+            KCFLAGS="-Wno-error -fcommon" \
             -j"$(nproc)" \
             "${MAKE_TARGET}" 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
@@ -162,6 +176,7 @@ jobs:
             grep -i "error:" build.log || true
             exit "$status"
           fi
+
       - name: Prepare AnyKernel3 flashable zip
         run: |
           set -euxo pipefail
@@ -207,6 +222,7 @@ jobs:
           cp out/.config artifact/kernel.config
           echo "===== artifact 内容 ====="
           ls -lh artifact
+
       - name: Upload flashable zip
         uses: actions/upload-artifact@v4
         with:
