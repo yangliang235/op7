@@ -1,0 +1,158 @@
+name: Build OnePlus-Sm8150-Kernel-OOS11
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - blu_spark-10
+  pull_request:
+    branches:
+      - blu_spark-10
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_DEFCONFIG: "blu_spark_defconfig"
+      # 关键：LD=ld.lld-14 必须放在 make 命令行，否则会被内核 Makefile 内 `LD = $(CROSS_COMPILE)ld` 覆盖
+      KERNEL_CMDLINE: "ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 LD=ld.lld-14 O=out"
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: 'true'
+        fetch-depth: 1
+    - name: Set up ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+
+    - name: Remove unnecessary files
+      run: |
+        sudo rm -rf /opt/ghc
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+    - name: Install dependencies
+      run: |
+        sudo apt-get update -y
+        sudo apt install gcc-aarch64-linux-gnu -y
+        sudo apt install gcc-arm-linux-gnueabi -y
+        sudo apt install clang-14 lld-14 llvm-14 -y
+        sudo apt install binutils make python3 libssl-dev build-essential bc bison flex unzip ca-certificates xz-utils cpio device-tree-compiler git git-lfs zip -y
+        git clone https://github.com/snowwolf725/AnyKernel3 -b oneplus7 --depth=1
+        rm -rf AnyKernel3/.git
+    - name: Integrate NoMount, Re-Kernel Natively & Configure Kernel
+      run: |
+        # 1. 原生集成 NoMount 源码
+        curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh | bash
+        # 2. 原生集成 Sakion-Team/Re-Kernel
+        git clone https://github.com/Sakion-Team/Re-Kernel.git rekernel_tmp --depth=1
+        if [ -d "rekernel_tmp/Integrate/drivers/rekernel" ]; then
+          cp -rf rekernel_tmp/Integrate/drivers/rekernel drivers/
+        elif [ -d "rekernel_tmp/Integrate/rekernel" ]; then
+          cp -rf rekernel_tmp/Integrate/rekernel drivers/
+        elif [ -d "rekernel_tmp/rekernel" ]; then
+          cp -rf rekernel_tmp/rekernel drivers/
+        fi
+        # 预防性修复：4.14 回移植 cgroup freezer v2 导致 JOBCTL_TRAP_FREEZE 缺失
+        if [ -f "drivers/rekernel/rekernel.h" ]; then
+          if ! grep -q "sched/jobctl.h" drivers/rekernel/rekernel.h; then
+            echo "Injecting #include <linux/sched/jobctl.h> into drivers/rekernel/rekernel.h..."
+            sed -i '1i #include <linux/sched/jobctl.h>' drivers/rekernel/rekernel.h
+          fi
+        fi
+        if [ -f "rekernel_tmp/Integrate/patch.py" ]; then
+          python3 rekernel_tmp/Integrate/patch.py .
+        elif [ -f "rekernel_tmp/Integrate/main.py" ]; then
+          python3 rekernel_tmp/Integrate/main.py .
+        fi
+        rm -rf rekernel_tmp
+        # 3. 追加内核配置开关
+        CONFIG_FILE="arch/arm64/configs/$KERNEL_DEFCONFIG"
+        if [ -f "$CONFIG_FILE" ]; then
+          echo "CONFIG_KALLSYMS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KALLSYMS_ALL=y" >> "$CONFIG_FILE"
+          echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
+          echo "CONFIG_NOMOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_OVERLAY_FS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$CONFIG_FILE"
+          echo "CONFIG_OVERLAY_FS_METACOPY=y" >> "$CONFIG_FILE"
+          echo "CONFIG_NAMESPACES=y" >> "$CONFIG_FILE"
+          echo "CONFIG_UTS_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_IPC_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_USER_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_PID_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_NET_NS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_REKERNEL=y" >> "$CONFIG_FILE"
+        fi
+        # 4. AnyKernel3 anykernel.sh
+        printf '%s\n' \
+          '### AnyKernel3 Ramdisk Mod Script' \
+          '## osm0sis @ xda-developers' \
+          '' \
+          '### AnyKernel setup' \
+          '# begin properties' \
+          "properties() { '" \
+          'kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel)' \
+          'do.devicecheck=1' \
+          'do.modules=0' \
+          'do.systemless=1' \
+          'do.cleanup=1' \
+          'do.cleanuponabort=0' \
+          'device.name1=OnePlus7' \
+          'device.name2=OnePlus7Pro' \
+          'device.name3=OnePlus7T' \
+          'device.name4=OnePlus7TPro' \
+          'device.name5=hotdogb' \
+          'device.name6=hotdog' \
+          'device.name7=guacamole' \
+          'device.name8=guacamoleb' \
+          'supported.versions=11.0' \
+          'supported.patchlevels=' \
+          "'; } # end properties" \
+          '' \
+          '### AnyKernel install' \
+          '' \
+          '## boot shell variables' \
+          'block=/dev/block/bootdevice/by-name/boot;' \
+          'is_slot_device=1;' \
+          'ramdisk_compression=auto;' \
+          'patch_vbmeta_flag=auto;' \
+          '' \
+          '# import functions/variables and setup patching - see for reference (DO NOT REMOVE)' \
+          '. tools/ak3-core.sh;' \
+          '' \
+          '# boot install' \
+          'split_boot;' \
+          '' \
+          'flash_boot;' \
+          '## end boot install' \
+          > AnyKernel3/anykernel.sh
+    - name: Build Kernel & Package Zip
+      run: |
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export TARGET_PRODUCT=msmnile
+        # 注意：LD 已写在 KERNEL_CMDLINE 里，make 命令行参数优先级最高，
+        # 不会被内核 Makefile 的 `LD = $(CROSS_COMPILE)ld` 覆盖。
+        make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14"
+        if [ -f "fragment/apatch.fragment" ]; then
+          echo "Merging fragment/apatch.fragment into out/.config..."
+          scripts/kconfig/merge_config.sh -m -O out out/.config fragment/apatch.fragment
+          make $KERNEL_CMDLINE olddefconfig CC="ccache clang-14"
+        else
+          echo "fragment/apatch.fragment not found, using defconfig as-is."
+        fi
+        make $KERNEL_CMDLINE CC="ccache clang-14" -j$(nproc --all)
+        cp out/arch/arm64/boot/Image AnyKernel3/
+        cd AnyKernel3
+        zip -r9 "../OP7-OOS11-kernel-APatchReady20261101.zip" * -x README.md
+        cd ..
+    - name: Upload Kernel Zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: OP7-OOS11-kernel-APatchReady20261101
+        path: "*.zip"
