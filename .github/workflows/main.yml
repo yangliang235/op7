@@ -17,7 +17,6 @@ jobs:
       CCACHE_MAXSIZE: "2G"
       CCACHE_HARDLINK: "true"
       KERNEL_DEFCONFIG: "blu_spark_defconfig"
-      # 关键：LD=ld.lld-14 必须放在 make 命令行，否则会被内核 Makefile 内 `LD = $(CROSS_COMPILE)ld` 覆盖
       KERNEL_CMDLINE: "ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 LD=ld.lld-14 O=out"
     steps:
     - name: Checkout
@@ -56,7 +55,6 @@ jobs:
         elif [ -d "rekernel_tmp/rekernel" ]; then
           cp -rf rekernel_tmp/rekernel drivers/
         fi
-        # 预防性修复：4.14 回移植 cgroup freezer v2 导致 JOBCTL_TRAP_FREEZE 缺失
         if [ -f "drivers/rekernel/rekernel.h" ]; then
           if ! grep -q "sched/jobctl.h" drivers/rekernel/rekernel.h; then
             echo "Injecting #include <linux/sched/jobctl.h> into drivers/rekernel/rekernel.h..."
@@ -95,7 +93,7 @@ jobs:
           '### AnyKernel setup' \
           '# begin properties' \
           "properties() { '" \
-          'kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel)' \
+          'kernel.string=APatch Ready Custom Kernel (NoMount + Re-Kernel + 4.52V)' \
           'do.devicecheck=1' \
           'do.modules=0' \
           'do.systemless=1' \
@@ -133,7 +131,7 @@ jobs:
 
     - name: Patch Power Supply (4.52V Default + Magisk Writeable)
       run: |
-        echo "🔧 修补 qpnp-smb5.c：默认满电 4.52V + 允许 Magisk 写入 voltage_max + echo 同步 vbatmax..."
+        echo "🔧 修补 qpnp-smb5.c：默认满电 4.52V + 允许 Magisk 写入 voltage_max..."
         python3 - << 'PYEOF'
         import os
         import re
@@ -150,13 +148,10 @@ jobs:
         original_content = content
 
         # ============ Patch 1: 强制默认 batt_profile_fv_uv = 4520000 ============
-        # 兼容多种 SMB5 源码写法
         n1 = 0
         patterns1 = [
-            # 模式A: chg->batt_profile_fv_uv
             (r'(rc = of_property_read_u32\(node,\s*"qcom,fv-max-uv",\s*&chg->batt_profile_fv_uv\);\s*\n\s*if\s*\(rc\s*<\s*0\)\s*\n\s*chg->batt_profile_fv_uv\s*=\s*-EINVAL;)',
              r'\1\n\n\t/* OnePlus SM8150: force 4.52V default full-charge voltage */\n\tchg->batt_profile_fv_uv = 4520000;'),
-            # 模式B: chip->dt.batt_profile_fv_uv
             (r'(rc = of_property_read_u32\(node,\s*"qcom,fv-max-uv",\s*&chip->dt\.batt_profile_fv_uv\);\s*\n\s*if\s*\(rc\s*<\s*0\)\s*\n\s*chip->dt\.batt_profile_fv_uv\s*=\s*-EINVAL;)',
              r'\1\n\n\t/* OnePlus SM8150: force 4.52V default full-charge voltage */\n\tchip->dt.batt_profile_fv_uv = 4520000;'),
         ]
@@ -164,37 +159,94 @@ jobs:
             content, n = re.subn(pat, rep, content, count=1, flags=re.DOTALL)
             if n >= 1:
                 n1 = n
-                print(f"✅ Patch1 成功")
+                print("✅ Patch1 成功")
                 break
         if n1 < 1:
-            # 回退：找 qcom,fv-max-uv 任意出现点，在其所在语句块后插入
             m = re.search(r'("qcom,fv-max-uv"[^;]*;)', content)
             if m:
                 insert = m.group(1) + "\n\n\t/* OnePlus SM8150: force 4.52V default full-charge voltage */\n\tchg->batt_profile_fv_uv = 4520000;"
                 content = content[:m.start()] + insert + content[m.end():]
                 n1 = 1
-                print(f"✅ Patch1 成功（宽松模式）")
+                print("✅ Patch1 成功（宽松模式）")
             else:
                 print("❌ Patch1 失败：找不到 qcom,fv-max-uv")
                 sys.exit(1)
 
         # ============ Patch 2: is_writeable 加 VOLTAGE_MAX ============
+        # 先打印所有 is_writeable 相关函数名，便于诊断
+        print("🔎 扫描 is_writeable 函数...")
+        for m in re.finditer(r'static\s+int\s+(\w*is_writeable\w*)\s*\(', content):
+            print(f"  发现: {m.group(1)}")
+
         n2 = 0
-        # 在 return 1; 的 case 里插入 POWER_SUPPLY_PROP_VOLTAGE_MAX
-        # 常见在 POWER_SUPPLY_PROP_DIE_HEALTH 或 POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED 附近
-        for anchor in ['POWER_SUPPLY_PROP_DIE_HEALTH',
-                       'POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED',
-                       'POWER_SUPPLY_PROP_SW_JEITA_ENABLED',
-                       'POWER_SUPPLY_PROP_STEP_CHARGING_ENABLED']:
-            pat = r'(case ' + anchor + r':\s*\n\s*return 1;)'
-            content, n = re.subn(pat, r'\1\n\tcase POWER_SUPPLY_PROP_VOLTAGE_MAX:\n\t\treturn 1;', content, count=1, flags=re.DOTALL)
-            if n >= 1:
-                n2 = n
-                print(f"✅ Patch2 成功（anchor={anchor}）")
-                break
+
+        # 策略 A: 定位 smb5_batt_prop_is_writeable 函数，在 return 0; 之前插入
+        m = re.search(r'static\s+int\s+smb5_batt_prop_is_writeable\s*\([^)]*\)\s*\{', content)
+        if m:
+            # 找到函数结尾
+            start = m.end()
+            depth = 1
+            i = start
+            while i < len(content) and depth > 0:
+                if content[i] == '{':
+                    depth += 1
+                elif content[i] == '}':
+                    depth -= 1
+                i += 1
+            func_end = i - 1  # 指向最后的 }
+            func_body = content[start:func_end]
+
+            if 'POWER_SUPPLY_PROP_VOLTAGE_MAX' not in func_body:
+                # 找 return 0; 或 default:
+                insert_pos = None
+                for marker in ['default:', 'return 0;']:
+                    idx = func_body.rfind(marker)
+                    if idx >= 0:
+                        insert_pos = start + idx
+                        break
+                if insert_pos is not None:
+                    insert = "\tcase POWER_SUPPLY_PROP_VOLTAGE_MAX:\n\t\treturn 1;\n\t"
+                    content = content[:insert_pos] + insert + content[insert_pos:]
+                    n2 = 1
+                    print("✅ Patch2 成功（smb5_batt_prop_is_writeable 函数内插入）")
+                else:
+                    print("⚠️ 找到 smb5_batt_prop_is_writeable 但找不到 default: 或 return 0;")
+
+        # 策略 B: 如果 A 失败，找任意 is_writeable 函数
         if n2 < 1:
-            print("❌ Patch2 失败：找不到 is_writeable 的 return 1 特征")
-            sys.exit(1)
+            m = re.search(r'static\s+int\s+(\w*is_writeable\w*)\s*\([^)]*\)\s*\{', content)
+            if m:
+                fname = m.group(1)
+                start = m.end()
+                depth = 1
+                i = start
+                while i < len(content) and depth > 0:
+                    if content[i] == '{':
+                        depth += 1
+                    elif content[i] == '}':
+                        depth -= 1
+                    i += 1
+                func_end = i - 1
+                func_body = content[start:func_end]
+                if 'POWER_SUPPLY_PROP_VOLTAGE_MAX' not in func_body:
+                    idx = func_body.rfind('default:')
+                    if idx < 0:
+                        idx = func_body.rfind('return 0;')
+                    if idx >= 0:
+                        insert_pos = start + idx
+                        insert = "\tcase POWER_SUPPLY_PROP_VOLTAGE_MAX:\n\t\treturn 1;\n\t"
+                        content = content[:insert_pos] + insert + content[insert_pos:]
+                        n2 = 1
+                        print(f"✅ Patch2 成功（{fname} 函数内插入）")
+
+        # 策略 C: 诊断模式——打印所有 is_writeable 函数前 30 行，跳过 patch
+        if n2 < 1:
+            print("⚠️ Patch2 未找到合适插入点，打印诊断（跳过 Patch2，不影响 4.52V 默认值）")
+            for m in re.finditer(r'(static\s+int\s+\w*is_writeable\w*\s*\([^)]*\)\s*\{)', content):
+                snippet = content[m.start():m.start()+1500]
+                print(f"--- {m.group(1)} ---")
+                print(snippet)
+                print("---")
 
         # ============ Patch 3: set_prop 里 VOLTAGE_MAX 同步 ============
         n3 = 0
@@ -202,9 +254,9 @@ jobs:
         content, n = re.subn(pat3, r'\1\n\t\t/* Keep parsed fv in sync so heartbeat re-votes the new value */\n\t\tchg->batt_profile_fv_uv = val->intval;', content, count=1, flags=re.DOTALL)
         if n >= 1:
             n3 = n
-            print(f"✅ Patch3 成功")
+            print("✅ Patch3 成功")
         else:
-            print("⚠️ Patch3 警告：找不到 VOLTAGE_MAX set 特征，跳过（不影响 4.52V 默认值和写权限）")
+            print("⚠️ Patch3 警告：找不到 VOLTAGE_MAX set 特征，跳过")
 
         if content != original_content:
             with open(FILE, 'w') as f:
@@ -230,8 +282,6 @@ jobs:
         export SUBARCH=arm64
         export BRAND_SHOW_FLAG=oneplus
         export TARGET_PRODUCT=msmnile
-        # 注意：LD 已写在 KERNEL_CMDLINE 里，make 命令行参数优先级最高，
-        # 不会被内核 Makefile 的 `LD = $(CROSS_COMPILE)ld` 覆盖。
         make $KERNEL_CMDLINE $KERNEL_DEFCONFIG CC="ccache clang-14"
         if [ -f "fragment/apatch.fragment" ]; then
           echo "Merging fragment/apatch.fragment into out/.config..."
