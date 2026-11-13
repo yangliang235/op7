@@ -130,6 +130,100 @@ jobs:
           'flash_boot;' \
           '## end boot install' \
           > AnyKernel3/anykernel.sh
+
+    - name: Patch Power Supply (4.52V Default + Magisk Writeable)
+      run: |
+        echo "🔧 修补 qpnp-smb5.c：默认满电 4.52V + 允许 Magisk 写入 voltage_max + echo 同步 vbatmax..."
+        python3 - << 'PYEOF'
+        import os
+        import re
+        import sys
+
+        FILE = "drivers/power/supply/qcom/qpnp-smb5.c"
+        if not os.path.exists(FILE):
+            print(f"❌ 致命错误：{FILE} 不存在")
+            sys.exit(1)
+
+        with open(FILE, 'r') as f:
+            content = f.read()
+
+        original_content = content
+
+        # ============ Patch 1: 强制默认 batt_profile_fv_uv = 4520000 ============
+        # 兼容多种 SMB5 源码写法
+        n1 = 0
+        patterns1 = [
+            # 模式A: chg->batt_profile_fv_uv
+            (r'(rc = of_property_read_u32\(node,\s*"qcom,fv-max-uv",\s*&chg->batt_profile_fv_uv\);\s*\n\s*if\s*\(rc\s*<\s*0\)\s*\n\s*chg->batt_profile_fv_uv\s*=\s*-EINVAL;)',
+             r'\1\n\n\t/* OnePlus SM8150: force 4.52V default full-charge voltage */\n\tchg->batt_profile_fv_uv = 4520000;'),
+            # 模式B: chip->dt.batt_profile_fv_uv
+            (r'(rc = of_property_read_u32\(node,\s*"qcom,fv-max-uv",\s*&chip->dt\.batt_profile_fv_uv\);\s*\n\s*if\s*\(rc\s*<\s*0\)\s*\n\s*chip->dt\.batt_profile_fv_uv\s*=\s*-EINVAL;)',
+             r'\1\n\n\t/* OnePlus SM8150: force 4.52V default full-charge voltage */\n\tchip->dt.batt_profile_fv_uv = 4520000;'),
+        ]
+        for pat, rep in patterns1:
+            content, n = re.subn(pat, rep, content, count=1, flags=re.DOTALL)
+            if n >= 1:
+                n1 = n
+                print(f"✅ Patch1 成功")
+                break
+        if n1 < 1:
+            # 回退：找 qcom,fv-max-uv 任意出现点，在其所在语句块后插入
+            m = re.search(r'("qcom,fv-max-uv"[^;]*;)', content)
+            if m:
+                insert = m.group(1) + "\n\n\t/* OnePlus SM8150: force 4.52V default full-charge voltage */\n\tchg->batt_profile_fv_uv = 4520000;"
+                content = content[:m.start()] + insert + content[m.end():]
+                n1 = 1
+                print(f"✅ Patch1 成功（宽松模式）")
+            else:
+                print("❌ Patch1 失败：找不到 qcom,fv-max-uv")
+                sys.exit(1)
+
+        # ============ Patch 2: is_writeable 加 VOLTAGE_MAX ============
+        n2 = 0
+        # 在 return 1; 的 case 里插入 POWER_SUPPLY_PROP_VOLTAGE_MAX
+        # 常见在 POWER_SUPPLY_PROP_DIE_HEALTH 或 POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED 附近
+        for anchor in ['POWER_SUPPLY_PROP_DIE_HEALTH',
+                       'POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED',
+                       'POWER_SUPPLY_PROP_SW_JEITA_ENABLED',
+                       'POWER_SUPPLY_PROP_STEP_CHARGING_ENABLED']:
+            pat = r'(case ' + anchor + r':\s*\n\s*return 1;)'
+            content, n = re.subn(pat, r'\1\n\tcase POWER_SUPPLY_PROP_VOLTAGE_MAX:\n\t\treturn 1;', content, count=1, flags=re.DOTALL)
+            if n >= 1:
+                n2 = n
+                print(f"✅ Patch2 成功（anchor={anchor}）")
+                break
+        if n2 < 1:
+            print("❌ Patch2 失败：找不到 is_writeable 的 return 1 特征")
+            sys.exit(1)
+
+        # ============ Patch 3: set_prop 里 VOLTAGE_MAX 同步 ============
+        n3 = 0
+        pat3 = r'(case POWER_SUPPLY_PROP_VOLTAGE_MAX:\s*\n\s*chg->batt_profile_fv_uv = val->intval;\s*\n\s*vote\(chg->fv_votable, BATT_PROFILE_VOTER, true, val->intval\);)'
+        content, n = re.subn(pat3, r'\1\n\t\t/* Keep parsed fv in sync so heartbeat re-votes the new value */\n\t\tchg->batt_profile_fv_uv = val->intval;', content, count=1, flags=re.DOTALL)
+        if n >= 1:
+            n3 = n
+            print(f"✅ Patch3 成功")
+        else:
+            print("⚠️ Patch3 警告：找不到 VOLTAGE_MAX set 特征，跳过（不影响 4.52V 默认值和写权限）")
+
+        if content != original_content:
+            with open(FILE, 'w') as f:
+                f.write(content)
+            print(f"✅ qpnp-smb5.c 修补完成 (patch1={n1}, patch2={n2}, patch3={n3})")
+        else:
+            print("❌ 没有任何修改生效")
+            sys.exit(1)
+        PYEOF
+
+        echo "🔧 扫描并修改设备树中的 qcom,fv-max-uv..."
+        FOUND=0
+        while IFS= read -r dts_file; do
+          echo "  修改: $dts_file"
+          sed -i 's/qcom,fv-max-uv = <[0-9]*>;/qcom,fv-max-uv = <4520000>;/g' "$dts_file"
+          FOUND=$((FOUND + 1))
+        done < <(grep -rl "qcom,fv-max-uv" arch/arm64/boot/dts 2>/dev/null || true)
+        echo "✅ 设备树修改完成，共 $FOUND 个文件"
+
     - name: Build Kernel & Package Zip
       run: |
         export ARCH=arm64
