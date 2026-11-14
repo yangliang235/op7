@@ -72,7 +72,9 @@ jobs:
         if [ -f "$CONFIG_FILE" ]; then
           echo "CONFIG_KALLSYMS=y" >> "$CONFIG_FILE"
           echo "CONFIG_KALLSYMS_ALL=y" >> "$CONFIG_FILE"
+          echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
           echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
+          echo "CONFIG_BLK_DEV_LOOP_MIN_COUNT=128" >> "$CONFIG_FILE"
           echo "CONFIG_NOMOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_OVERLAY_FS=y" >> "$CONFIG_FILE"
           echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$CONFIG_FILE"
@@ -173,17 +175,14 @@ jobs:
                 sys.exit(1)
 
         # ============ Patch 2: is_writeable 加 VOLTAGE_MAX ============
-        # 先打印所有 is_writeable 相关函数名，便于诊断
         print("🔎 扫描 is_writeable 函数...")
         for m in re.finditer(r'static\s+int\s+(\w*is_writeable\w*)\s*\(', content):
             print(f"  发现: {m.group(1)}")
 
         n2 = 0
 
-        # 策略 A: 定位 smb5_batt_prop_is_writeable 函数，在 return 0; 之前插入
         m = re.search(r'static\s+int\s+smb5_batt_prop_is_writeable\s*\([^)]*\)\s*\{', content)
         if m:
-            # 找到函数结尾
             start = m.end()
             depth = 1
             i = start
@@ -193,11 +192,10 @@ jobs:
                 elif content[i] == '}':
                     depth -= 1
                 i += 1
-            func_end = i - 1  # 指向最后的 }
+            func_end = i - 1
             func_body = content[start:func_end]
 
             if 'POWER_SUPPLY_PROP_VOLTAGE_MAX' not in func_body:
-                # 找 return 0; 或 default:
                 insert_pos = None
                 for marker in ['default:', 'return 0;']:
                     idx = func_body.rfind(marker)
@@ -212,7 +210,6 @@ jobs:
                 else:
                     print("⚠️ 找到 smb5_batt_prop_is_writeable 但找不到 default: 或 return 0;")
 
-        # 策略 B: 如果 A 失败，找任意 is_writeable 函数
         if n2 < 1:
             m = re.search(r'static\s+int\s+(\w*is_writeable\w*)\s*\([^)]*\)\s*\{', content)
             if m:
@@ -239,7 +236,6 @@ jobs:
                         n2 = 1
                         print(f"✅ Patch2 成功（{fname} 函数内插入）")
 
-        # 策略 C: 诊断模式——打印所有 is_writeable 函数前 30 行，跳过 patch
         if n2 < 1:
             print("⚠️ Patch2 未找到合适插入点，打印诊断（跳过 Patch2，不影响 4.52V 默认值）")
             for m in re.finditer(r'(static\s+int\s+\w*is_writeable\w*\s*\([^)]*\)\s*\{)', content):
@@ -290,6 +286,49 @@ jobs:
         else
           echo "fragment/apatch.fragment not found, using defconfig as-is."
         fi
+
+        echo ""
+        echo "🔧 注入关键配置到 out/.config（防止 fragment / olddefconfig 覆盖）..."
+        echo "CONFIG_ZRAM=y" >> out/.config
+        echo "CONFIG_ZRAM_WRITEBACK=y" >> out/.config
+        echo "CONFIG_BLK_DEV_LOOP_MIN_COUNT=128" >> out/.config
+        make $KERNEL_CMDLINE olddefconfig CC="ccache clang-14"
+
+        echo ""
+        echo "🔍 检查 out/.config 中的 ZRAM / LOOP 配置:"
+        grep -E "^CONFIG_ZRAM=|^CONFIG_ZRAM_WRITEBACK=|^CONFIG_ZSMALLOC=|^CONFIG_BLK_DEV_LOOP" out/.config || echo "(未匹配到)"
+
+        if ! grep -q "^CONFIG_ZRAM_WRITEBACK=y" out/.config; then
+          echo "⚠️ CONFIG_ZRAM_WRITEBACK 未生效，强制恢复..."
+          echo "CONFIG_ZRAM=y" >> out/.config
+          echo "CONFIG_ZSMALLOC=y" >> out/.config
+          echo "CONFIG_ZRAM_WRITEBACK=y" >> out/.config
+          make $KERNEL_CMDLINE olddefconfig CC="ccache clang-14"
+        fi
+
+        if grep -q "^CONFIG_ZRAM_WRITEBACK=y" out/.config; then
+          echo "✅ CONFIG_ZRAM_WRITEBACK=y 最终确认生效"
+        else
+          echo "❌ CONFIG_ZRAM_WRITEBACK 无法启用，Kconfig 依赖信息:"
+          sed -n '/config ZRAM_WRITEBACK/,/^$/p' drivers/block/zram/Kconfig || true
+          exit 1
+        fi
+
+        if grep -q "^CONFIG_BLK_DEV_LOOP_MIN_COUNT=128" out/.config; then
+          echo "✅ CONFIG_BLK_DEV_LOOP_MIN_COUNT=128 最终确认生效"
+        else
+          echo "⚠️ CONFIG_BLK_DEV_LOOP_MIN_COUNT 未生效，当前值:"
+          grep -E "^CONFIG_BLK_DEV_LOOP" out/.config || true
+        fi
+
+        echo ""
+        echo "🔍 检查 zram_drv.c 是否包含 writeback_limit 代码:"
+        if grep -q "writeback_limit" drivers/block/zram/zram_drv.c; then
+          echo "✅ 源码包含 writeback_limit 代码，共 $(grep -c "writeback_limit" drivers/block/zram/zram_drv.c) 处"
+        else
+          echo "⚠️ 源码不含 writeback_limit（backport 可能缺失），但 CONFIG_ZRAM_WRITEBACK 已开"
+        fi
+
         make $KERNEL_CMDLINE CC="ccache clang-14" -j$(nproc --all)
         cp out/arch/arm64/boot/Image AnyKernel3/
         cd AnyKernel3
