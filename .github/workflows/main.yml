@@ -131,6 +131,75 @@ jobs:
           '## end boot install' \
           > AnyKernel3/anykernel.sh
 
+    - name: Patch zram writeback_limit_enable (添加清零逻辑)
+      run: |
+        echo "🔧 给 writeback_limit_enable_store 添加 bd_writes 清零逻辑..."
+        python3 - << 'PYEOF'
+        import re
+        import sys
+
+        FILE = "drivers/block/zram/zram_drv.c"
+        with open(FILE, 'r') as f:
+            content = f.read()
+
+        m = re.search(
+            r'static\s+ssize_t\s+writeback_limit_enable_store\s*\([^)]*\)\s*\{',
+            content
+        )
+        if not m:
+            print("❌ 找不到 writeback_limit_enable_store，可能补丁缺失")
+            sys.exit(1)
+
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(content) and depth > 0:
+            if content[i] == '{':
+                depth += 1
+            elif content[i] == '}':
+                depth -= 1
+            i += 1
+        func_end = i
+
+        func_body = content[start:func_end - 1]
+
+        if 'bd_writes = 0' in func_body:
+            print("✅ 已包含清零逻辑，跳过")
+            sys.exit(0)
+
+        new_body = func_body
+        inserted = False
+        for lock_release in [
+            'up_read(&zram->init_lock);',
+            'up_write(&zram->init_lock);',
+            'mutex_unlock(&zram->init_lock);',
+        ]:
+            idx = new_body.find(lock_release)
+            if idx >= 0:
+                insert = "\tif (zram->wb_limit_enable)\n\t\tzram->bd_writes = 0;\n\n\t"
+                new_body = new_body[:idx] + insert + new_body[idx:]
+                inserted = True
+                print(f"✅ 在 '{lock_release.strip()}' 前插入清零逻辑")
+                break
+
+        if not inserted:
+            print("❌ 找不到 init_lock 释放点，无法插入")
+            sys.exit(1)
+
+        content = content[:start] + new_body + content[func_end - 1:]
+        with open(FILE, 'w') as f:
+            f.write(content)
+        print("✅ zram_drv.c 修补完成")
+
+        print("\n🔍 修补后的函数片段:")
+        m = re.search(
+            r'static\s+ssize_t\s+writeback_limit_enable_store[\s\S]*?\n\}',
+            content
+        )
+        if m:
+            print(m.group(0))
+        PYEOF
+
     - name: Patch Power Supply (4.52V Default + Magisk Writeable)
       run: |
         echo "🔧 修补 qpnp-smb5.c：默认满电 4.52V + 允许 Magisk 写入 voltage_max..."
@@ -149,7 +218,6 @@ jobs:
 
         original_content = content
 
-        # ============ Patch 1: 强制默认 batt_profile_fv_uv = 4520000 ============
         n1 = 0
         patterns1 = [
             (r'(rc = of_property_read_u32\(node,\s*"qcom,fv-max-uv",\s*&chg->batt_profile_fv_uv\);\s*\n\s*if\s*\(rc\s*<\s*0\)\s*\n\s*chg->batt_profile_fv_uv\s*=\s*-EINVAL;)',
@@ -174,7 +242,6 @@ jobs:
                 print("❌ Patch1 失败：找不到 qcom,fv-max-uv")
                 sys.exit(1)
 
-        # ============ Patch 2: is_writeable 加 VOLTAGE_MAX ============
         print("🔎 扫描 is_writeable 函数...")
         for m in re.finditer(r'static\s+int\s+(\w*is_writeable\w*)\s*\(', content):
             print(f"  发现: {m.group(1)}")
@@ -244,7 +311,6 @@ jobs:
                 print(snippet)
                 print("---")
 
-        # ============ Patch 3: set_prop 里 VOLTAGE_MAX 同步 ============
         n3 = 0
         pat3 = r'(case POWER_SUPPLY_PROP_VOLTAGE_MAX:\s*\n\s*chg->batt_profile_fv_uv = val->intval;\s*\n\s*vote\(chg->fv_votable, BATT_PROFILE_VOTER, true, val->intval\);)'
         content, n = re.subn(pat3, r'\1\n\t\t/* Keep parsed fv in sync so heartbeat re-votes the new value */\n\t\tchg->batt_profile_fv_uv = val->intval;', content, count=1, flags=re.DOTALL)
