@@ -130,76 +130,6 @@ jobs:
           'flash_boot;' \
           '## end boot install' \
           > AnyKernel3/anykernel.sh
-
-    - name: Patch zram writeback_limit_enable (添加清零逻辑)
-      run: |
-        echo "🔧 给 writeback_limit_enable_store 添加 bd_writes 清零逻辑..."
-        python3 - << 'PYEOF'
-        import re
-        import sys
-
-        FILE = "drivers/block/zram/zram_drv.c"
-        with open(FILE, 'r') as f:
-            content = f.read()
-
-        m = re.search(
-            r'static\s+ssize_t\s+writeback_limit_enable_store\s*\([^)]*\)\s*\{',
-            content
-        )
-        if not m:
-            print("❌ 找不到 writeback_limit_enable_store，可能补丁缺失")
-            sys.exit(1)
-
-        start = m.end()
-        depth = 1
-        i = start
-        while i < len(content) and depth > 0:
-            if content[i] == '{':
-                depth += 1
-            elif content[i] == '}':
-                depth -= 1
-            i += 1
-        func_end = i
-
-        func_body = content[start:func_end - 1]
-
-        if 'bd_writes = 0' in func_body:
-            print("✅ 已包含清零逻辑，跳过")
-            sys.exit(0)
-
-        new_body = func_body
-        inserted = False
-        for lock_release in [
-            'up_read(&zram->init_lock);',
-            'up_write(&zram->init_lock);',
-            'mutex_unlock(&zram->init_lock);',
-        ]:
-            idx = new_body.find(lock_release)
-            if idx >= 0:
-                insert = "\tif (zram->wb_limit_enable)\n\t\tzram->bd_writes = 0;\n\n\t"
-                new_body = new_body[:idx] + insert + new_body[idx:]
-                inserted = True
-                print(f"✅ 在 '{lock_release.strip()}' 前插入清零逻辑")
-                break
-
-        if not inserted:
-            print("❌ 找不到 init_lock 释放点，无法插入")
-            sys.exit(1)
-
-        content = content[:start] + new_body + content[func_end - 1:]
-        with open(FILE, 'w') as f:
-            f.write(content)
-        print("✅ zram_drv.c 修补完成")
-
-        print("\n🔍 修补后的函数片段:")
-        m = re.search(
-            r'static\s+ssize_t\s+writeback_limit_enable_store[\s\S]*?\n\}',
-            content
-        )
-        if m:
-            print(m.group(0))
-        PYEOF
-
     - name: Patch Power Supply (4.52V Default + Magisk Writeable)
       run: |
         echo "🔧 修补 qpnp-smb5.c：默认满电 4.52V + 允许 Magisk 写入 voltage_max..."
@@ -207,17 +137,14 @@ jobs:
         import os
         import re
         import sys
-
         FILE = "drivers/power/supply/qcom/qpnp-smb5.c"
         if not os.path.exists(FILE):
             print(f"❌ 致命错误：{FILE} 不存在")
             sys.exit(1)
-
         with open(FILE, 'r') as f:
             content = f.read()
-
         original_content = content
-
+        # ============ Patch 1: 强制默认 batt_profile_fv_uv = 4520000 ============
         n1 = 0
         patterns1 = [
             (r'(rc = of_property_read_u32\(node,\s*"qcom,fv-max-uv",\s*&chg->batt_profile_fv_uv\);\s*\n\s*if\s*\(rc\s*<\s*0\)\s*\n\s*chg->batt_profile_fv_uv\s*=\s*-EINVAL;)',
@@ -241,13 +168,11 @@ jobs:
             else:
                 print("❌ Patch1 失败：找不到 qcom,fv-max-uv")
                 sys.exit(1)
-
+        # ============ Patch 2: is_writeable 加 VOLTAGE_MAX ============
         print("🔎 扫描 is_writeable 函数...")
         for m in re.finditer(r'static\s+int\s+(\w*is_writeable\w*)\s*\(', content):
             print(f"  发现: {m.group(1)}")
-
         n2 = 0
-
         m = re.search(r'static\s+int\s+smb5_batt_prop_is_writeable\s*\([^)]*\)\s*\{', content)
         if m:
             start = m.end()
@@ -261,7 +186,6 @@ jobs:
                 i += 1
             func_end = i - 1
             func_body = content[start:func_end]
-
             if 'POWER_SUPPLY_PROP_VOLTAGE_MAX' not in func_body:
                 insert_pos = None
                 for marker in ['default:', 'return 0;']:
@@ -276,7 +200,6 @@ jobs:
                     print("✅ Patch2 成功（smb5_batt_prop_is_writeable 函数内插入）")
                 else:
                     print("⚠️ 找到 smb5_batt_prop_is_writeable 但找不到 default: 或 return 0;")
-
         if n2 < 1:
             m = re.search(r'static\s+int\s+(\w*is_writeable\w*)\s*\([^)]*\)\s*\{', content)
             if m:
@@ -302,7 +225,6 @@ jobs:
                         content = content[:insert_pos] + insert + content[insert_pos:]
                         n2 = 1
                         print(f"✅ Patch2 成功（{fname} 函数内插入）")
-
         if n2 < 1:
             print("⚠️ Patch2 未找到合适插入点，打印诊断（跳过 Patch2，不影响 4.52V 默认值）")
             for m in re.finditer(r'(static\s+int\s+\w*is_writeable\w*\s*\([^)]*\)\s*\{)', content):
@@ -310,7 +232,7 @@ jobs:
                 print(f"--- {m.group(1)} ---")
                 print(snippet)
                 print("---")
-
+        # ============ Patch 3: set_prop 里 VOLTAGE_MAX 同步 ============
         n3 = 0
         pat3 = r'(case POWER_SUPPLY_PROP_VOLTAGE_MAX:\s*\n\s*chg->batt_profile_fv_uv = val->intval;\s*\n\s*vote\(chg->fv_votable, BATT_PROFILE_VOTER, true, val->intval\);)'
         content, n = re.subn(pat3, r'\1\n\t\t/* Keep parsed fv in sync so heartbeat re-votes the new value */\n\t\tchg->batt_profile_fv_uv = val->intval;', content, count=1, flags=re.DOTALL)
@@ -319,7 +241,6 @@ jobs:
             print("✅ Patch3 成功")
         else:
             print("⚠️ Patch3 警告：找不到 VOLTAGE_MAX set 特征，跳过")
-
         if content != original_content:
             with open(FILE, 'w') as f:
                 f.write(content)
@@ -328,7 +249,6 @@ jobs:
             print("❌ 没有任何修改生效")
             sys.exit(1)
         PYEOF
-
         echo "🔧 扫描并修改设备树中的 qcom,fv-max-uv..."
         FOUND=0
         while IFS= read -r dts_file; do
@@ -337,7 +257,6 @@ jobs:
           FOUND=$((FOUND + 1))
         done < <(grep -rl "qcom,fv-max-uv" arch/arm64/boot/dts 2>/dev/null || true)
         echo "✅ 设备树修改完成，共 $FOUND 个文件"
-
     - name: Build Kernel & Package Zip
       run: |
         export ARCH=arm64
@@ -352,18 +271,15 @@ jobs:
         else
           echo "fragment/apatch.fragment not found, using defconfig as-is."
         fi
-
         echo ""
         echo "🔧 注入关键配置到 out/.config（防止 fragment / olddefconfig 覆盖）..."
         echo "CONFIG_ZRAM=y" >> out/.config
         echo "CONFIG_ZRAM_WRITEBACK=y" >> out/.config
         echo "CONFIG_BLK_DEV_LOOP_MIN_COUNT=128" >> out/.config
         make $KERNEL_CMDLINE olddefconfig CC="ccache clang-14"
-
         echo ""
         echo "🔍 检查 out/.config 中的 ZRAM / LOOP 配置:"
         grep -E "^CONFIG_ZRAM=|^CONFIG_ZRAM_WRITEBACK=|^CONFIG_ZSMALLOC=|^CONFIG_BLK_DEV_LOOP" out/.config || echo "(未匹配到)"
-
         if ! grep -q "^CONFIG_ZRAM_WRITEBACK=y" out/.config; then
           echo "⚠️ CONFIG_ZRAM_WRITEBACK 未生效，强制恢复..."
           echo "CONFIG_ZRAM=y" >> out/.config
@@ -371,7 +287,6 @@ jobs:
           echo "CONFIG_ZRAM_WRITEBACK=y" >> out/.config
           make $KERNEL_CMDLINE olddefconfig CC="ccache clang-14"
         fi
-
         if grep -q "^CONFIG_ZRAM_WRITEBACK=y" out/.config; then
           echo "✅ CONFIG_ZRAM_WRITEBACK=y 最终确认生效"
         else
@@ -379,14 +294,12 @@ jobs:
           sed -n '/config ZRAM_WRITEBACK/,/^$/p' drivers/block/zram/Kconfig || true
           exit 1
         fi
-
         if grep -q "^CONFIG_BLK_DEV_LOOP_MIN_COUNT=128" out/.config; then
           echo "✅ CONFIG_BLK_DEV_LOOP_MIN_COUNT=128 最终确认生效"
         else
           echo "⚠️ CONFIG_BLK_DEV_LOOP_MIN_COUNT 未生效，当前值:"
           grep -E "^CONFIG_BLK_DEV_LOOP" out/.config || true
         fi
-
         echo ""
         echo "🔍 检查 zram_drv.c 是否包含 writeback_limit 代码:"
         if grep -q "writeback_limit" drivers/block/zram/zram_drv.c; then
@@ -394,14 +307,13 @@ jobs:
         else
           echo "⚠️ 源码不含 writeback_limit（backport 可能缺失），但 CONFIG_ZRAM_WRITEBACK 已开"
         fi
-
         make $KERNEL_CMDLINE CC="ccache clang-14" -j$(nproc --all)
         cp out/arch/arm64/boot/Image AnyKernel3/
         cd AnyKernel3
-        zip -r9 "../OP7-OOS11-kernel-APatchReady20261102.zip" * -x README.md
+        zip -r9 "../OP7-OOS11-kernel-APatchReady20261116.zip" * -x README.md
         cd ..
     - name: Upload Kernel Zip
       uses: actions/upload-artifact@v4
       with:
-        name: OP7-OOS11-kernel-APatchReady20261102
+        name: OP7-OOS11-kernel-APatchReady20261116
         path: "*.zip"
